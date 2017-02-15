@@ -91,7 +91,7 @@ ENV/
 .ropeproject
 
 
-### R
+## R
 
 # History files
 .Rhistory
@@ -99,6 +99,9 @@ ENV/
 
 # Session Data files
 .RData
+
+# Rda data files (these can get big)
+.rda
 
 # Example code in package build process
 *-Ex.R
@@ -127,3 +130,8 @@ vignettes/*.pdf
 *.utf8.md
 *.knit.md
 .Rproj.user
+
+
+
+## Other
+timing/
