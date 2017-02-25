@@ -1,0 +1,469 @@
+---
+title: "Model Comparison"
+author: "Zarrar Shehzad"
+date: "February 17, 2017"
+output: 
+  html_document: 
+    fig_width: 10
+    number_sections: yes
+    toc: yes
+---
+
+We want to understand face representation in the FFA. One hypothesis is that 
+face features based on the shape and texture form a multidimensional space. 
+Another hypothesis is that we form a higher-level model of face features more 
+related to everyday features relevant to us such as gender, age, intelligence 
+and that these features better reflect the underlying variables that cause 
+variation in a person's face. So low-level shape/texture features might be used
+to bootstrap a higher level model of age, gender, etc. and this is what is 
+represented in the FFA.
+
+We can test these two models by seeing which better predict activity in the FFA
+as well as the larger ventral face network.
+
+Note that right now this is a bit messy as I'm assuming the feature data is 
+already loaded.
+
+
+## Setup
+
+Load a bunch of packages and functions.
+
+```{r}
+# Path for my own packages
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+
+# General workhorse function
+library(plyr)
+
+# Parallelization
+suppressMessages(library(doMC))
+registerDoMC(24)
+
+# If we were to use ggplot2 and other plotting needs
+library(RColorBrewer)
+library(ggplot2)
+source("/data1/famface01/command/encoding/FirstPass/plot_functions.R")
+
+# This gets us the simple_lm function for faster GLMs
+source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
+
+## For heatmap.2
+#suppressMessages(library(gplots))
+## For our own custom convolution
+#source("/data1/famface01/command/encoding/ShapesAnalysis/000_funs_load_convolve.R")
+```
+
+And some general variable of interest.
+
+```{r}
+subjects <- sprintf("sub%02i", 1:6) # again skipping sub01
+#indir    <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+rnames   <- c("r.vATL","r.aFFA", "r.pFFA", "r.OFA", "r.EBA", 'r.Amyg', 
+              "l.vATL", "l.FFA", "l.OFA", "l.EBA", 'l.Amyg')
+```
+
+
+### Load
+
+#### Predicted/Residual Face Features
+
+Actually first load the predicted/residual face features.
+
+```{r}
+indir <- "/data1/famface01/analysis/misc/320_roi_task_activity"
+load(file.path(indir, "20_predict_face_feats.rda"))
+vnames <- demo.vnames
+```
+
+#### Convolve Features
+
+Second convolve the different features including faces. We only temporarily
+need to do faces again first due to a previous error.
+
+```{r}
+source("/data1/famface01/command/encoding/ShapesAnalysis/000_funs_load_convolve.R")
+suppressMessages(library(bigmemory))
+
+tmpfile <- "/tmp/22_roi_predicts_vs_shapes_convs.rda"
+if (file.exists(tmpfile)) {
+  load(tmpfile, verbose=T)
+} else {
+  #dat <- dat.vols$sub01
+
+  system.time(conv.faces <- llply(dat.vols, function(dat) {
+    convolve.features.worker(dat$basics$timing, dat$features$face, verbose=F, parallel=F)
+  }, .parallel=T))
+  
+  system.time(conv.fas <- llply(dat.vols, function(dat) {
+    # rearrange/assign
+    ref.vnames <- as.character(dat$basics$timing$video)
+    fac.scores2 <- matrix(0, length(ref.vnames), ncol(fac.scores))
+    for (i in 1:nrow(fac.scores)) {
+      inds <- which(ref.vnames == vnames[i])
+      if (length(inds) != 2) stop("error")
+      fac.scores2[inds,] <- fac.scores[rep(i,2),]
+    }
+    
+    convs.comps <- convolve.features.byvid(dat$basics, fac.scores2, parallel=F, verbose=F)
+    convs.comps
+  }, .parallel=T))
+  
+  system.time(conv.preds <- llply(dat.vols, function(dat) {
+    # rearrange/assign
+    ref.vnames <- as.character(dat$basics$timing$video)
+    fac.preds2 <- matrix(0, length(ref.vnames), ncol(fac.preds))
+    for (i in 1:nrow(fac.scores)) {
+      inds <- which(ref.vnames == vnames[i])
+      if (length(inds) != 2) stop("error")
+      fac.preds2[inds,] <- fac.preds[rep(i,2),]
+    }
+    
+    convs.comps <- convolve.features.byvid(dat$basics, fac.preds2, parallel=F, verbose=F)
+    convs.comps
+  }, .parallel=T))
+  
+  system.time(conv.resids <- llply(dat.vols, function(dat) {
+    # rearrange/assign
+    ref.vnames <- as.character(dat$basics$timing$video)
+    fac.resids2 <- matrix(0, length(ref.vnames), ncol(fac.resids))
+    for (i in 1:nrow(fac.scores)) {
+      inds <- which(ref.vnames == vnames[i])
+      if (length(inds) != 2) stop("error")
+      fac.resids2[inds,] <- fac.resids[rep(i,2),]
+    }
+    
+    convs.comps <- convolve.features.byvid(dat$basics, fac.resids2, parallel=F, verbose=F)
+    convs.comps
+  }, .parallel=T))
+  
+  # takes 22secs! but is ok cuz have others
+  system.time(convs.lows <- llply(dat.vols, function(dat) {
+    low.info <- pca.face.feats
+    # rearrange/assign
+    ref.vnames <- as.character(dat$basics$timing$video)
+    low.info2 <- matrix(0, length(ref.vnames), ncol(low.info))
+    for (i in 1:nrow(low.info)) {
+      inds <- which(ref.vnames == vnames[i])
+      if (length(inds) != 2) stop("error")
+      low.info2[inds,] <- low.info[rep(i,2),]
+    }
+    convs.low <- convolve.features.byvid(dat$basics, low.info2, parallel=F, verbose=F)
+    convs.low
+  }, .parallel=T))
+    
+  # get motion
+  load.mc <- function(subj) {
+    funcdir  <- file.path("/data1/famface01/analysis/preprocessed", subj, "func")
+    df.paths <- read.table(file.path(funcdir, "df_paths.txt"), header=T)
+    inds     <- df.paths$inindex[df.paths$name == "unfam_vids"]
+    fpaths   <- sprintf("%s/mc/func_run%02i_dfile.1D", funcdir, inds)
+    
+    mcs <- ldply(fpaths, function(fpath) {
+      x <- read.table(fpath)
+      x <- as.matrix(x)
+      x <- scale(x, scale=F, center=T)
+      x
+    })
+    mcs <- as.matrix(mcs)
+    
+    colnames(mcs) <- c("roll", "pitch", "yaw", "dS", "dL", "dP")
+    
+    mcs
+  }
+  lst.mcs <- lapply(subjects, load.mc)
+  names(lst.mcs) <- subjects
+  
+  # FDs
+  load.fds <- function(subj) {
+    funcdir  <- file.path("/data1/famface01/analysis/preprocessed", subj, "func")
+    df.paths <- read.table(file.path(funcdir, "df_paths.txt"), header=T)
+    inds     <- df.paths$inindex[df.paths$name == "unfam_vids"]
+    
+    fpaths   <- sprintf("%s/mc/func_run%02i_fd_rel.1D", funcdir, inds)
+    fds_rel  <- ldply(fpaths, function(fpath) {
+      x <- read.table(fpath)
+      x <- as.matrix(x)
+      x <- scale(x, scale=F, center=T)
+      x
+    })
+    fds_rel <- as.matrix(fds_rel)
+    
+    fpaths   <- sprintf("%s/mc/func_run%02i_fd_abs.1D", funcdir, inds)
+    fds_abs  <- ldply(fpaths, function(fpath) {
+      x <- read.table(fpath)
+      x <- as.matrix(x)
+      x <- scale(x, scale=F, center=T)
+      x
+    })
+    fds_abs <- as.matrix(fds_abs)
+    
+    cbind(rel=fds_rel, abs=fds_abs)
+  }
+  lst.fds <- lapply(subjects, load.fds)
+  names(lst.fds) <- subjects
+  
+  # combine things
+  ssubs   <- rep(subjects, sapply(conv.faces, nrow))
+  subvars <- model.matrix(~ssubs+0)
+  sfaces  <- do.call(rbind, conv.faces)
+  sfas    <- do.call(rbind, conv.fas)
+  spreds  <- do.call(rbind, conv.preds)
+  sresids <- do.call(rbind, conv.resids)
+  slows   <- do.call(rbind, convs.lows)
+  smcs    <- do.call(rbind, lst.mcs)
+  sfds    <- do.call(rbind, lst.fds)
+  colnames(sfds) <- c("rel", "abs")
+  
+  # these results remove the effect of each subject
+  subvars2 <- subvars[,-1]
+  sfaces2  <- do.call(rbind, lapply(conv.faces, scale, center=T, scale=F))
+  sfas2    <- do.call(rbind, lapply(conv.fas, scale, center=T, scale=F))
+  spreds2  <- do.call(rbind, lapply(conv.preds, scale, center=T, scale=F))
+  sresids2 <- do.call(rbind, lapply(conv.resids, scale, center=T, scale=F))
+  slows2   <- do.call(rbind, lapply(convs.lows, scale, center=T, scale=F))
+  smcs2    <- do.call(rbind, lapply(lst.mcs, scale, center=T, scale=F))
+  sfds2    <- do.call(rbind, lapply(lst.fds, scale, center=T, scale=F))
+  colnames(sfds2) <- c("rel", "abs")
+  
+  save(ssubs, subvars, sfaces, sfas, sresids, slows, smcs, sfds, spreds, 
+       subvars2, sfaces2, sfas2, sresids2, slows2, smcs2, sfds2, spreds2, 
+       file=tmpfile)
+}
+```
+
+#### ROI Data
+
+Then first, get the ROI data.
+
+```{r}
+load.cur <- function(subj) {
+  indir <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+  infile <- sprintf("%s/roi_n_more_%s.rda", indir, subj)
+  dat <- NULL
+  load(infile)
+  dat
+}
+
+dat.vols <- lapply(subjects, load.cur)
+names(dat.vols) <- subjects
+```
+
+#### Average ROI Time-Series
+
+We compile the average of each ROI (for now).
+
+```{r}
+lst.rdats <- lapply(dat.vols, function(dat) {
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  rdats
+})
+rdats <- do.call(rbind, lst.rdats)
+```
+
+
+## Regression Analyses
+
+We look at both ANOVA and GLM results.
+
+### Sample ROI Results
+
+We will look at the results of the right pFFA ROI.
+
+```{r}
+print(rnames[3])
+y <- rdats[,3]
+fit  <- aov(y ~ ssubs + smcs + sfds + sfaces + spreds + sresids + slows)
+sfit <- summary(fit)
+sfit
+```
+
+We note several points from the above results:
+
+* First, the predicted factors has a higher Fstat than the lower-level face features (slows).
+* The higher predicted factor Fstat might be driven by the much higher Df for the low-level features, meaning that most of the variance could be just in the first few features and so we are penalizing these set of features a lot more than needed. Note that the total SS is higher for the low-level features.
+* The F-stats for the framewise displacement (FD) and 6 motion parameters (mcs) are much higher than the effects of interest. This seems like it should be a concern.
+* The face response is very robust.
+
+### Reducing DFs of Low-Level Features
+
+We take the top 18 PCA components to reduce the DF for the low-level features. Note that the Fstat does go up but not by that much.
+
+```{r}
+pca.slows <- prcomp(slows2, retx=T)$x
+top.pca.slows <- pca.slows[,1:18]
+fit  <- aov(y ~ ssubs + smcs + sfds + sfaces + spreds + sresids + top.pca.slows)
+sfit <- summary(fit)
+sfit
+```
+
+### Looking at all the ROIs
+
+In almost all of the ROIs, the predicted trait scores fit the ROI data better than the residuals or the low-level features, except in the vATL and the EBA. In the EBA, the residuals offer a better fit suggesting there's something we aren't fitting with our data that's useful in that region.
+
+```{r}
+fit  <- aov(rdats ~ ssubs + smcs + sfds + sfaces + spreds + sresids + slows)
+sfit <- summary(fit)
+sfit
+```
+
+### Individual Variables
+
+We can pop the hood and see what specific variables in the predicted trait scores are important in related to the ROI timeseries data. We make this easier by removing some other sets of variables.
+
+```{r}
+fit  <- lm(y ~ ssubs + smcs + sfds + sfaces + spreds)
+sfit <- summary(fit)
+sfit
+```
+
+Well thhe results above are more promising. Many of the predicted face factor regressors are signficant so it might be that including all of them together reduces the fit or reduces the appearance of a fit.
+
+Below are the loadings from the face factors. The most significant fit (F=-7) is factor 3 and is related to age. The next one was #9 (F=-6) is related to being humble and #5 (F=5) is related to trustworthiness (those 2 seem related). Then #4 => typical (F=-4.5), and then we have #17 and #18 but these appear distributed across items.
+
+```{r}
+library(corrplot)
+hc1     <- hclust(dist(fac.loads))
+hc1     <- as.dendrogram(hc1)
+ord.hc1 <- order.dendrogram(hc1)
+loading <- fac.loads[ord.hc1,]
+col <- rev(colorRampPalette(c("#67001F", "#B2182B", "#D6604D", 
+                              "#F4A582", "#FDDBC7", "#FFFFFF", "#D1E5F0", "#92C5DE", 
+                              "#4393C3", "#2166AC", "#053061"))(200))
+corrplot(loading, tl.col='black', tl.cex=.75, diag=T, col=col, is.corr=T)
+```
+
+
+## Visualize Fits
+
+Let's try to to plot the fits.
+
+In general, we can see the the fit isn't really too bad. Adding stuff on the 
+face regressors, helps at some points. And there are some points where the fit
+gets terrible. Maybe some type of attention effect there?
+
+We try four different models, adding on more variables. For each model we see the fitted response on the data.
+
+```{r}
+y <- rdats[,3]
+
+# Fits
+fit1  <- lm(y ~ ssubs + smcs + sfds + sfaces)
+fit2  <- lm(y ~ ssubs + smcs + sfds + sfaces + spreds)
+fit3  <- lm(y ~ ssubs + smcs + sfds + sfaces + spreds + sresids)
+fit4  <- lm(y ~ ssubs + smcs + sfds + sfaces + spreds + sresids + slows)
+
+# Adjusted R2
+print(summary(fit1)$adj.r.squared) # base
+print(summary(fit2)$adj.r.squared) # add predicted factors
+print(summary(fit3)$adj.r.squared) # add residuals factors
+print(summary(fit4)$adj.r.squared) # add low-level factors
+
+# 
+tdat  <- cbind(y,fit1$fitted.values,fit2$fitted.values,fit3$fitted.values,fit4$fitted.values)
+#tdat2 <- scale(tdat)[1:200,]
+tdat2 <- tdat[1:200,]
+xlims <- range(c(0:200)) + c(0,30)
+ylims <- c(-1,1) * max(abs(tdat2)) * 1.05
+plot.ts(tdat2, plot.type="single", col=1:5, ylab="Activity", ylim=ylims, xlim=xlims)
+abline(h=0, lty=3)
+legend("right", legend=c("ROI", "Base", "+Predicted", "+Residuals", "+Low-Level"), col=1:5, pch="-")
+```
+
+Let's just look at base model and adding the predicted regressors.
+
+```{r}
+# 
+tdat  <- cbind(y,fit1$fitted.values,fit2$fitted.values)
+#tdat2 <- scale(tdat)[1:200,]
+tdat2 <- tdat[1:200,]
+xlims <- range(c(0:200)) + c(0,30)
+ylims <- c(-1,1) * max(abs(tdat2)) * 1.05
+plot.ts(tdat2, plot.type="single", col=c(1,3,2), ylab="Activity", ylim=ylims, xlim=xlims)
+abline(h=0, lty=3)
+legend("right", legend=c("ROI", "Base", "+Predicted"), col=c(1,3,2), pch="-")
+```
+
+And what do the residuals look like? If the residuals also look like signal (which they do), then suggesting that we aren't capturing a lot of the data. So here we compare the actual data with the fitted values and the residuals.
+
+```{r}
+cat("r(fitting) =", cor(y, fit2$fitted.values), "\n")
+cat("r(residuals) =", cor(y, fit2$residuals), "\n")
+tdat <- cbind(y, fit2$fitted.values, fit2$residuals)
+#tdat2 <- scale(tdat)[1:200,]
+tdat2 <- tdat[1:200,]
+xlims <- range(c(0:200)) + c(0,30)
+ylims <- c(-1,1) * max(abs(tdat2)) * 1.05
+plot.ts(tdat2, plot.type="single", col=c(1,2,4), ylab="Activity", ylim=ylims, xlim=xlims)
+abline(h=0, lty=3)
+legend("right", legend=c("ROI", "+Predicted", "+Residuals"), col=c(1,2,4), pch="-")
+```
+
+## Improving Fit
+
+I could try using lagged versions of the regressor to improve the fit. Nope the lag isn't what's doing it.
+
+```{r}
+mat <- model.matrix(~ssubs + smcs + sfds + sfaces + spreds)
+mat2 <- cbind(mat[,1:14], mat[,15:ncol(mat)], rbind(0, diff(mat[,15:ncol(mat)], lag=1)), rbind(0, 0,  diff(mat[,15:ncol(mat)], lag=2)))
+mat3 <- cbind(mat[,1:14], mat[,15:ncol(mat)], rbind(0, 0, diff(mat[,15:ncol(mat)], lag=2)), rbind(0, 0, 0, 0,  diff(mat[,15:ncol(mat)], lag=4)))
+fit1  <- lm(y ~ mat)
+fit2  <- lm(y ~ mat2)
+fit3  <- lm(y ~ mat3)
+
+cat("r(fitting1) =", cor(y, fit1$fitted.values), "\n")
+cat("r(fitting2) =", cor(y, fit2$fitted.values), "\n")
+cat("r(fitting3) =", cor(y, fit3$fitted.values), "\n")
+
+tdat <- cbind(y, fit1$fitted.values, fit2$fitted.values, fit3$fitted.values)
+tdat2 <- tdat[1:200,]
+xlims <- range(c(0:200)) + c(0,30)
+ylims <- c(-1,1) * max(abs(tdat2)) * 1.05
+plot.ts(tdat2, plot.type="single", col=c(1,2,4,5), ylab="Activity", ylim=ylims, xlim=xlims)
+abline(h=0, lty=3)
+legend("right", legend=c("ROI", "+NoLag", "+Lag1", "+Lag2"), col=c(1,2,4,5), pch="-")
+```
+
+What if we doing a moving window regression? Might there be certain windows that are better? We restrict the whole thing to the 200 timepoints. Oh this fit is better.
+
+```{r}
+mat <- model.matrix(~ssubs + smcs + sfds + sfaces + spreds)
+
+mat0 <- mat[1:200,-c(2:6)] # don't need ssubs
+y0 <- y[1:200]
+
+# Try whole window
+fit0  <- lm(y0 ~ mat0)
+plot.ts(cbind(y0, fit0$fitted.values), plot.type="single", ylab="Activity", col=1:2, main="Fit for 1sub and 200s")
+cor(cbind(y0, fit0$fitted.values))[1,2]
+```
+
+Hmm so that works, maybe it is because I'm looking at one subject now and not just the this time segment.
+
+```{r}
+mat0 <- mat[ssubs=='sub01',-c(2:6)] # don't need ssubs
+y0 <- y[ssubs=='sub01']
+
+# Try subject
+fit0  <- lm(y0 ~ mat0)
+plot.ts(cbind(y0, fit0$fitted.values)[1:200,], plot.type="single", ylab="Activity", col=1:2, main="Fit for 1sub and all pts, showing 200s")
+cor(cbind(y0, fit0$fitted.values)[1:200,])[1,2]
+```
+
+It's a bit of both, looking at the fit now when reducing the window to 50tpts (50s).
+
+```{r}
+mat <- model.matrix(~ssubs + smcs + sfds + sfaces + spreds)
+mat0 <- mat[1:200,-c(2:6)] # don't need ssubs
+y0 <- y[1:200]
+# Try chunks of 50
+fits  <- lapply(seq(0,150,by=50), function(ti) {
+  tinds <- (ti+1):(ti+50)
+  lm(y0[tinds] ~ mat0[tinds,])
+})
+fitvals <- unlist(lapply(fits, function(fit) fit$fitted.values))
+# Plot
+plot.ts(cbind(y0, fitvals), plot.type="single", ylab="Activity", col=1:2, main="Fit for 1sub with 50s wins, showing 200s")
+cor(cbind(y0, fitvals))[1,2]
+```

@@ -1,0 +1,186 @@
+---
+title: "TS Convolution"
+author: "Zarrar Shehzad"
+date: "February 17, 2017"
+output: html_document
+---
+
+Looking at doing convolution right for time-series data. I have some sample 
+data being used here that will be used to predict the brain data. We also have
+the HRF that we will be convolved with the data here.
+
+```{r}
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+
+chrf <- NULL; feats <- NULL
+load("z_convolve_vars.rda")
+```
+
+## Plain R
+
+Here I make use of plain R data for the convolution. The default R options mean
+that a circular convolution is done but we need to pad the data so the beginning
+of our time-series isn't convolved with the end of the time-series. The result
+of doing this though is that R returns the padded time-series and we need to just
+unpad the results. You can see from the result in red, the beginning of the 
+signal is now proper, everything else is the same.
+
+```{r}
+system.time(s.conv0 <- convolve(chrf, rev(feats)))
+system.time(s.conv1 <- convolve(chrf, rev(feats), type = "open")[1:length(feats)])
+plot.ts(cbind(s.conv0, s.conv1), plot.type = "single", col=1:2)
+```
+
+## FFTW
+
+Now wee try out the fftw function in `fftwtools` to speed things up. Haha so
+for some reason this is all running slower than I'd want.
+
+```{r}
+  library(fftwtools)
+  library(fftw)
+
+  n <- 2**16
+  chrf <- rnorm(n)
+  
+  system.time(fft(fft(chrf) * Conj(fft(chrf)), inverse=TRUE))
+  
+  system.time(p <- fftw::planFFT(chrf))
+  system.time(IFFT(FFT(chrf, plan=p) * Conj(FFT(chrf, plan=p)), plan=p, scale=F))
+  
+  system.time(for (i in 1:10) tmp1 <- fft(chrf))
+  system.time(for (i in 1:10) tmp2 <- fftwtools::fftw(chrf))
+  system.time(for (i in 1:10) tmp3 <- fftw::FFT(chrf))
+  system.time(p <- fftw::planFFT(chrf))
+  system.time(for (i in 1:10) tmp3 <- fftw::FFT(chrf, plan=p))
+  
+  system.time(for (i in 1:6) tmp1 <- fft(chrf))
+  system.time(mtmp2 <- mvfftw(cbind(chrf,chrf,chrf,chrf,chrf,chrf,chrf)))
+  
+  
+  
+  head(tmp3)
+  head(tmp1)
+```
+
+
+```{r}
+library(fftw)
+
+# linear convolution
+  
+x <- chrf; y <- feats
+n <- length(x)
+ny <- length(y)
+
+# test shorter padding
+tmp <- diff(chrf) < 1e-8
+tmp2 <- rle(tmp)
+npad <- length(chrf) - tmp2$lengths[length(tmp2$lengths)] + 1
+
+# pad...onl
+n1 <- ny - 1
+#n1 <- min(npad, n1)
+x <- c(rep.int(0,n1), x)
+n <- length(y <- c(y, rep.int(0, n - 1)))
+
+# convolve...compare the two approaches
+## note: here that 
+system.time(x0 <- fft(fft(x) * Conj(fft(y)), inverse=TRUE))
+system.time(x0 <- Re(x0)/n)
+
+system.time(p <- fftw::planFFT(x))
+system.time(x1 <- IFFT(FFT(x, plan=p) * Conj(FFT(y, plan=p)), plan=p, scale=F))
+system.time(x1 <- Re(x1)/n)
+
+all.equal(x0,x1)
+```
+
+
+Below we see the code to run this baby with one set of features.
+
+```{r}
+xref <- x1
+
+x <- chrf; y <- rev(feats)
+n <- length(x)
+ny <- length(y)
+if (n != ny) stop("x and y must be the same lengths")
+
+# pad
+n1 <- ny - 1
+x <- c(rep.int(0,n1), x)
+n <- length(y <- c(y, rep.int(0,n1)))
+
+# convolve
+system.time(p <- fftw::planFFT(x))
+system.time(x1 <- IFFT(FFT(x, plan=p) * Conj(FFT(y, plan=p)), plan=p, scale=F))
+x1 <- Re(x1)/n
+x2 <- x1[1:ny]
+
+plot.ts(x1[1:(ny+100)])
+plot.ts(x2)
+
+tmp <- convolve(chrf, rev(feats), type="open")
+plot.ts(tmp[1:(length(feats)+1000)])
+
+all.equal(x1, tmp)
+```
+
+
+```{r}
+convolve.fftw <- function(x, y) {
+  library(fftw)
+  n  <- length(x)
+  ny <- length(y)
+  if (n != ny) stop("x and y must be the same lengths")
+  
+  # pad
+  n1 <- ny - 1
+  x <- c(rep.int(0,n1), x)
+  n <- length(y <- c(y, rep.int(0,n1)))
+  
+  # convolve
+  p <- fftw::planFFT(x)
+  x1 <- IFFT(FFT(x, plan=p) * Conj(FFT(y, plan=p)), plan=p, scale=F)
+  x1 <- Re(x1)/n
+  x1 <- x1[1:ny]
+  
+  return(x1)
+}
+
+convolve.mfftw <- function(x, ys) {
+  library(fftw)
+  n  <- length(x)
+  ny <- nrow(ys)
+  if (n != ny) stop("x and y must be the same lengths")
+  
+  # pad
+  n1 <- ny - 1
+  x <- c(rep.int(0,n1), x)
+  n <- length(x)
+  ys0 <- ys
+  ys <- matrix(0, n, ncol(ys))
+  ys[1:ny,] <- ys0
+  rm(ys0)
+  
+  # convolve
+  p <- fftw::planFFT(x)
+  xx <- FFT(x, plan=p)
+  x1s <- sapply(1:ncol(ys), function(i) {
+    Re(IFFT(xx * Conj(FFT(ys[,i], plan=p)), plan=p, scale=F))
+  })
+  x1s <- x1s/n
+  x1s <- x1s[1:ny,]
+  
+  return(x1s)
+}
+
+# So we save some time with this multi-convolve thingy
+ys <- cbind(feats,feats,feats,feats,feats)
+system.time(convolve.mfftw(chrf, ys))
+system.time(sapply(1:ncol(ys), function(i) convolve.fftw(chrf, ys[,i])))
+system.time(sapply(1:ncol(ys), function(i) convolve(chrf, ys[,i], type='open')))
+# 3/0.1
+```

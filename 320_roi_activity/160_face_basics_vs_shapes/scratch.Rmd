@@ -1,0 +1,212 @@
+---
+title: "Compile Demos/Traits"
+author: "Zarrar Shehzad"
+date: "February 16, 2017"
+output: html_document
+---
+
+I will compile together the different demographic and trait measures that will
+be used in a subsequent 'face-space' analyses. Note that 
+
+## Setup
+
+```{r}
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+library(plyr)
+suppressMessages(library(doMC))
+registerDoMC(30)
+library(RColorBrewer)
+library(dynamicTreeCut)
+
+library(ggplot2)
+source("/data1/famface01/command/encoding/FirstPass/plot_functions.R")
+source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
+```
+
+Load the data.
+
+```{r}
+# Load demographics information
+base <- "/data1/famface01/analysis/encoding/12_Features"
+demos <- read.csv(sprintf('%s/demographics_unfam_df.csv', base))
+demos <- demos[,-1]
+demo.vnames <- demos$video # typo
+demo.vnames <- sub("_fr[0-9]{3}", "", demo.vnames)
+df.demos    <- demos[,-c(1:2)]
+df.demos    <- df.demos[,-c(6:7)] # remove hair and eye color
+
+# Load trait information
+base         <- "/data1/famface01/analysis/encoding/12_Features"
+traits       <- read.csv(sprintf('%s/personality_traits_grpave.csv', base))
+trait.vnames <- as.character(traits[,1])
+traits       <- traits[,-1]
+# Reorder to match with demos
+oinds       <- sapply(demo.vnames, function(x) which(trait.vnames == x))
+all.equal(trait.vnames[oinds], demo.vnames)
+df.traits   <- traits[oinds,]
+
+# Save vnames
+vnames <- demo.vnames
+```{r}
+
+Format the data frames.
+
+```{r}
+formula_to_mat <- function(formula, data) {
+  mf <- model.frame(formula=formula, data=data)
+  X <- model.matrix(attr(mf, "terms"), data=mf)
+  return(X)
+}
+
+## function for the compiling
+compile.demo.trait <- function(df.demos, df.traits) {
+  ## DEMOGRAPHICS
+  # Remove the effect of gender from makeup
+  df.demos2 <- df.demos
+  df.demos2$makeup <- lm(makeup ~ gender, data=df.demos2)$residuals
+  # Center age
+  df.demos2$age <- scale(df.demos2$age, scale=F, center=T)
+  # Set the reference for facial hair to when none
+  df.demos2 <- within(df.demos2, facial_hair <- relevel(facial_hair, ref = "None"))
+  # Set the reference for race to when white
+  df.demos2 <- within(df.demos2, race <- relevel(race, ref = "White"))
+  # Get the matrix
+  mat.demos1 <- formula_to_mat(~.-1, df.demos2)
+  mat.demos2 <- formula_to_mat(~., df.demos2) # note this will have the intercept
+  
+  ## TRAITS
+  mat.traits <- scale(df.traits, scale=F, center=T)
+  
+  return(cbind(mat.demos2, mat.traits))
+}
+
+## DEMOGRAPHICS
+# Remove the effect of gender from makeup
+df.demos2 <- df.demos
+df.demos2$makeup <- lm(makeup ~ gender, data=df.demos2)$residuals
+# Center age
+df.demos2$age <- scale(df.demos2$age, scale=F, center=T)
+# Set the reference for facial hair to when none
+df.demos2 <- within(df.demos2, facial_hair <- relevel(facial_hair, ref = "None"))
+# Set the reference for race to when white
+df.demos2 <- within(df.demos2, race <- relevel(race, ref = "White"))
+# Get the matrix
+mat.demos1 <- formula_to_mat(~.-1, df.demos2)
+mat.demos2 <- formula_to_mat(~., df.demos2) # note this will have the intercept
+
+## TRAITS
+mat.traits <- scale(df.traits, scale=F, center=T)
+```
+
+And now let's try to combine them together.
+
+
+```{r}
+getcomps.iter <- function(mat, k=20, nsim=25, scale=FALSE, parallel=TRUE) {
+  library(svd)
+  c     <- ncol(mat)
+  if (scale) mat <- scale(mat)
+  
+  # Run the initial SVD
+  tsvd <- trlan.svd(mat, k)
+  true.evals <- tsvd$d
+  
+  # Run the initial permutations
+  perm.evals <- laply(1:nsim, function(i) {
+    #creating the random normal takes too long and gives similar results
+    #y <- mvrnorm(n=r, mu=rep(0,c), Sigma=diag(1,c), empirical=F)
+    y <- apply(mat, 2, sample)
+    evals <- trlan.svd(y, k)$d
+    evals
+  }, .parallel=T)
+  
+  # Test the components to keep
+  pvals <- sapply(1:length(true.evals), function(ci) {
+    vec <- c(true.evals[ci], perm.evals[,ci]) # combine true with permuted
+    sum(vec[1]<=vec)/length(vec)
+  })
+  ncomps  <- sum(pvals<0.05)
+  
+  # If # of components is the same as k, then do another batch
+  if (ncomps == k) {
+    # We won't run the permutations again, instead we fit a line to the results 
+    # and predict the 95% confidence interval of future permuted component values
+    dimnames(perm.evals) <- list(sim=1:nsim, comp=1:k)
+    df <- reshape2::melt(perm.evals, value.name="eval")
+    fit <- lm(eval ~ comp, data=df)
+    
+    for (i in seq(k+1, c, by=k)) {
+      cat(i, ".", sep="")
+      cur.k <- min(k, c-i)
+      tot.k <- i + cur.k - 1
+      
+      # Get next eigen vals
+      tsvd <- trlan.svd(mat, tot.k, lambda = tsvd$d, U = tsvd$u)
+      true.evals <- tsvd$d
+      
+      # Get the permuted upper range
+      pred <- predict(fit, newdata=data.frame(comp=1:tot.k), 
+                      interval="predict")
+      perm.uwr <- pred[,3]
+      
+      # Test components to keep....at first false, call it quits
+      if (any(true.evals < perm.uwr)) {
+        ncomps <- which(true.evals < perm.uwr)[1]
+        break
+      } else {
+        ncomps <- tot.k
+      }
+    }
+    cat("\n")
+  }
+  
+  cat("...found", ncomps, "components out of", c, "\n")
+  tsvd$k <- ncomps
+  tsvd$d <- tsvd$d[1:ncomps]
+  tsvd$u <- tsvd$u[,1:ncomps]
+  
+  return(tsvd)
+}
+
+trait.fa <- factanal(mat.traits, factors = 6, rotation = "varimax", 
+                     na.action = na.omit, scores="regression")
+loadings(trait.fa)
+
+mat.all <- cbind(mat.demos2[,-1], mat.traits)
+tmp <- getcomps.iter(scale(mat.all, scale=F, center=T)) # lol only 3
+
+library(psych)
+fa.parallel(mat.all) # suggests 9 comps
+vss(mat.all, 25) # suggests 18
+
+all.fa1 <- factanal(mat.all, factors = 9, rotation = "varimax", 
+                   na.action = na.omit, scores="regression")
+all.fa2 <- factanal(mat.all, factors = 16, rotation = "varimax", 
+                   na.action = na.omit, scores="regression", 
+                   control=list(lower=0.000000001))
+loadings(all.fa2)
+```
+
+```{r}
+source("/data1/famface01/command/encoding/ShapesAnalysis/000_funs_load_convolve.R")
+
+suppressMessages(library(bigmemory))
+
+conv.traitsfa <- lapply(dat.vols, function(dat) {
+  mat.all <- compile.demo.trait(dat$features$demos, dat$features$traits)
+  
+  all.fa <- factanal(mat.all[,-1], factors = 16, rotation = "varimax", 
+                     na.action = na.omit, scores="regression", 
+                     control=list(lower=0.005))
+  convs.comps <- convolve.features.byvid(dat$basics, all.fa$scores)
+  convs.comps
+})
+#save(conv.traits, conv.traitspca, conv.traitsfa, file=rdafile)
+}
+```
+
+
+```{r}
+# wud now do the regression
+```

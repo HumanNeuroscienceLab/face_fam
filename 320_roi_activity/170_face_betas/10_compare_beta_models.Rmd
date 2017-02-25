@@ -1,0 +1,806 @@
+---
+title: "Decide on Betas"
+author: "Zarrar Shehzad"
+date: "February 22, 2017"
+output: html_document
+---
+
+Here, I want to figure out the best way to model the beta-estimates. The thing that I will be varying is the HRF estimate and whether I have a 1, 2, or 3 parameter SPM-style model.
+
+## Setup
+
+```{r}
+# Path for my own packages
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+
+# General workhorse function
+library(plyr)
+
+# Parallelization
+suppressMessages(library(doMC))
+registerDoMC(24)
+
+# If we were to use ggplot2 and other plotting needs
+library(RColorBrewer)
+library(ggplot2)
+source("/data1/famface01/command/encoding/FirstPass/plot_functions.R")
+
+# This gets us the simple_lm function for faster GLMs
+source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
+
+## For heatmap.2
+#suppressMessages(library(gplots))
+```
+
+And some general variable of interest.
+
+```{r}
+subjects <- sprintf("sub%02i", 1:6) # again skipping sub01
+#indir    <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+rnames   <- c("r.vATL","r.aFFA", "r.pFFA", "r.OFA", "r.EBA", 'r.Amyg', 
+              "l.vATL", "l.FFA", "l.OFA", "l.EBA", 'l.Amyg')
+```
+
+
+```{r}
+library(glmnet)
+
+get_bestfit <- function(cvfit, type.measure, exclude.zero=FALSE) {
+  bestouts <- cvfit$measures[[type.measure]]
+  extreme  <- ifelse(type.measure == "rmse", min, max)
+  
+  if (exclude.zero) {
+    val <- extreme(bestouts[cvfit$nzero>0])
+  } else {
+    val <- extreme(bestouts)
+  }
+  
+  ind <- which(bestouts == val)
+  
+  bestfit  <- list(
+    measure = type.measure, 
+    val     = val, 
+    ind     = ind, 
+    lam     = cvfit$lambda[ind], 
+    preval  = cvfit$fit.preval[,ind], 
+    nzero   = cvfit$nzero[ind], 
+    coef    = coef(cvfit, s=cvfit$lambda[ind])
+  )
+  bestfit
+}
+
+run_cvglmnet <- function(X, y, keep=T, parallel=T, type.measure="rsq", exclude.zero=FALSE, ...) 
+{
+  if (!(type.measure %in% c("rsq", "r", "rmse"))) stop("unknown type.measure: ", type.measure)
+  
+  rmse <- function(x1, x2) sqrt(mean((x1-x2)^2))
+  
+  #cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel)
+  cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel, ...)
+  
+  rs     <- sapply(1:length(cvfit$lambda), function(i) cor(cvfit$fit.preval[,i], y))
+  rsqs   <- rs^2
+  rmses  <- sapply(1:length(cvfit$lambda), function(i) rmse(cvfit$fit.preval[,i], y))
+  cvfit$measures <- list(
+    r = rs, 
+    rsq = rsqs, 
+    rmse = rmses
+  )
+  
+  cvfit$bestfit <- get_bestfit(cvfit, type.measure, exclude.zero)
+  
+  return(cvfit)
+}
+```
+
+
+## Load Data and Features
+
+Load the ROI data and timing etc information.
+
+```{r}
+load.cur <- function(subj) {
+  indir <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+  infile <- sprintf("%s/roi_n_more_%s.rda", indir, subj)
+  dat <- NULL
+  load(infile)
+  dat
+}
+
+dat.vols <- lapply(subjects, load.cur)
+names(dat.vols) <- subjects
+```
+
+Also load the features (to regress on the data).
+
+```{r}
+indir <- "/data1/famface01/analysis/misc/320_roi_task_activity"
+load(file.path(indir, "20_predict_face_feats.rda"), verbose=T)
+```
+
+
+## Regress the 
+
+Let's setup the design matrices.
+
+```{r}
+source("/data1/famface01/command/encoding/ShapesAnalysis/000_funs_load_convolve.R")
+
+#' mags => magnitudes, can be a value, vector, or matrix. if matrix each column is some vector
+#' frate indicates how much to upsample
+gen.events <- function(onsets, durs, tot.time, mags=1, frate=1/24)
+{
+  # For comparison:
+  # neuRosim::stimfunction(tot.time, onsets, durs, frate)
+  
+  if (length(mags) == 1) mags <- rep(mags, length(onsets))
+  if (length(durs) == 1) durs <- rep(durs, length(onsets))
+  if (length(onsets) != length(durs)) stop("onsets and durs must be same length")
+  mags <- as.matrix(mags)
+  nc <- ncol(mags)
+  
+  # Upsample the features (faster way to do this?)
+  ## setup upsampled data
+  up.feats <- matrix(0, round(tot.time/frate), nc)
+  ## find new indices to put things
+  onsets  <- round(onsets/frate + 1)
+  durs    <- round(durs/frate)
+  offsets <- sapply(1:length(onsets), function(i) max(onsets[i] + durs[i] - 1, onsets[i]))
+  offsets[offsets > nrow(up.feats)] <- nrow(up.feats)
+  ns      <- offsets - onsets + 1
+  up.inds <- unlist(lapply(1:length(onsets), function(i) onsets[i]:offsets[i]))
+  ## corresponding indices in regularly sampled data
+  reg.inds<- rep(1:length(onsets), ns)
+  ## upsample
+  up.feats[up.inds,] <- mags[reg.inds,]
+  
+  return(up.feats)
+}
+
+library(neuRosim)
+apply.convolve <- function(up.feats, runs, hrf_fun=canonicalHRF, frate=1/24, parallel=F, ...) {
+  # Get the HRF to convolve
+  uruns    <- sort(unique(runs))
+  nruns    <- max(uruns)
+  ntpts    <- sum(runs==uruns[1])
+  tpts     <- seq(frate, ntpts, frate) # 318 * 16runs = 2288 * 24frames
+  chrf     <- hrf_fun(tpts, ...)
+  up.runs <- rep(1:nruns, each=length(tpts))
+  
+  # Convolve
+  conv.up.feats <- llply(1:nruns, function(irun) {
+    ys <- up.feats[up.runs==irun,,drop=F]
+    ys <- ys[nrow(ys):1,,drop=F] # same as rev to each column
+    s.convs <- convolve.mfftw(chrf, ys)
+    for (i in 1:ncol(s.convs)) {
+      s.convs[,i] <- s.convs[,i]/max(s.convs[,i]) # normalize
+      s.convs[is.na(s.convs[,i]),i] <- 0
+    }
+    s.convs
+  }, .parallel=parallel) # TODO: test if parallel is actually faster!
+  conv.up.feats <- do.call(rbind, conv.up.feats)
+  conv.up.feats <- as.matrix(conv.up.feats)
+  
+  return(conv.up.feats)
+}
+
+downsample <- function(up.dat, tr=1, frate=1/24) {
+  ix <- seq(1, nrow(up.dat), tr/frate)
+  down.dat <- up.dat[ix,,drop=F]
+  return(down.dat)
+}
+
+convolve.hrf <- function(onsets, durs, tot.time, runs, 
+                         mags=1, frate=1/24, tr=1, parallel=F)
+{
+  s1 <- gen.events(onsets, durs, tot.time, mags, frate)
+  c1 <- apply.convolve(s1, runs, frate=frate, parallel=parallel, verbose=F)
+  d1 <- downsample(c1, tr, frate)
+  return(d1)
+}
+
+convolve.spm.hrf <- function(onsets, durs, tot.time, runs, 
+                             mags=1, frate=1/24, tr=1, parallel=F)
+{
+  s1 <- gen.events(onsets, durs, tot.time, mags, frate)
+  d1s   <- sapply(c(spmt, dspmt, ddspmt), function(hfun) {
+    c1 <- apply.convolve(s1, runs, hrf_fun=hfun, frate=frate, parallel=parallel)
+    d1 <- downsample(c1, tr, frate)
+    d1
+  })
+  return(d1s)
+}
+
+convolve.afni.hrf <- function(onsets, durs, tot.time, runs, afni.ret, 
+                             mags=1, frate=1/24, tr=1, parallel=F)
+{
+  afni_fun <- function(tpts, ci=1) {
+    afni.tpts <- vector("numeric", length(tpts))
+    afni.tpts[1:nrow(afni.ret)] <- afni.ret[,ci]
+    afni.tpts
+  }
+  s1 <- gen.events(onsets, durs, tot.time, mags, frate)
+  d1s   <- sapply(1:ncol(afni.ret), function(ci) {
+    c1 <- apply.convolve(s1, runs, hrf_fun=afni_fun, frate=frate, parallel=parallel, ci=ci)
+    d1 <- downsample(c1, tr, frate)
+    d1
+  })
+  return(d1s)
+}
+
+load.mc <- function(subj) {
+  funcdir  <- file.path("/data1/famface01/analysis/preprocessed", subj, "func")
+  df.paths <- read.table(file.path(funcdir, "df_paths.txt"), header=T)
+  inds     <- df.paths$inindex[df.paths$name == "unfam_vids"]
+  fpaths   <- sprintf("%s/mc/func_run%02i_dfile.1D", funcdir, inds)
+  
+  mcs <- ldply(fpaths, function(fpath) {
+    x <- read.table(fpath)
+    x <- as.matrix(x)
+    x <- scale(x, scale=F, center=T)
+    x
+  })
+  mcs <- as.matrix(mcs)
+  
+  colnames(mcs) <- c("roll", "pitch", "yaw", "dS", "dL", "dP")
+  
+  mcs
+}
+
+load.fds <- function(subj) {
+  funcdir  <- file.path("/data1/famface01/analysis/preprocessed", subj, "func")
+  df.paths <- read.table(file.path(funcdir, "df_paths.txt"), header=T)
+  inds     <- df.paths$inindex[df.paths$name == "unfam_vids"]
+  
+  fpaths   <- sprintf("%s/mc/func_run%02i_fd_rel.1D", funcdir, inds)
+  fds_rel  <- ldply(fpaths, function(fpath) {
+    x <- read.table(fpath)
+    x <- as.matrix(x)
+    x <- scale(x, scale=F, center=T)
+    x
+  })
+  fds_rel <- as.matrix(fds_rel)
+  
+  fpaths   <- sprintf("%s/mc/func_run%02i_fd_abs.1D", funcdir, inds)
+  fds_abs  <- ldply(fpaths, function(fpath) {
+    x <- read.table(fpath)
+    x <- as.matrix(x)
+    x <- scale(x, scale=F, center=T)
+    x
+  })
+  fds_abs <- as.matrix(fds_abs)
+  
+  cbind(rel=fds_rel, abs=fds_abs)
+}
+```
+
+The code below can be expanded to better understand the fit.
+
+```{r}
+subj <- "sub01"
+dat <- dat.vols$sub01
+rdats <- sapply(dat$fmri$dat, rowMeans)
+
+vid.timing <- dat$basics$timing
+vnames <- levels(vid.timing$video)
+
+runs <- dat$fmri$runs
+tot.time <- length(runs)
+
+# All faces
+onsets0 <- vid.timing$onset
+durs0   <- vid.timing$duration
+
+# Motion
+mc <- load.mc(subj)
+fd <- load.fds(subj)
+
+# Try different frame rates
+frate <- 1/24
+reg.frates <- sapply(c(1/24, 1/10, 1/5, 1), function(frate) {
+  s1    <- gen.events(onsets0, durs0, tot.time, frate=frate)
+  c1a   <- apply.convolve(s1, runs, hrf_fun=spmt, frate=frate)
+  d1a   <- downsample(c1a, frate=frate)
+  d1a
+})
+cor(reg.frates)
+
+frate <- 1/12; system.time({ s1    <- gen.events(onsets0, durs0, tot.time, frate=frate); c1a   <- apply.convolve(s1, runs, hrf_fun=spmt, frate=frate); d1a   <- downsample(c1a, frate=frate) })
+
+# Add the other regressors
+frate <- 1/12
+s1    <- gen.events(onsets0, durs0, tot.time, frate=frate)
+d1s   <- sapply(c(spmt, dspmt, ddspmt), function(hfun) {
+  c1 <- apply.convolve(s1, runs, hrf_fun=hfun, frate=frate)
+  d1 <- downsample(c1, frate=frate)
+})
+
+spm.d1s <- convolve.spm.hrf(onsets0, durs0, tot.time, runs, frate=1/12)
+reg.d1 <- convolve.hrf(onsets0, durs0, tot.time, runs, frate=1/12)
+
+# So adding the 3rd parameter doesn't help for this subject
+t(sapply(1:ncol(rdats), function(i) {
+  fit1 <- lm(rdats[,i] ~ mc + fd + d1s[,1])
+  fit2 <- lm(rdats[,i] ~ mc + fd + d1s[,1:2])
+  fit3 <- lm(rdats[,i] ~ mc + fd + d1s[,1:3])
+  res <- anova(fit1, fit2, fit3)
+  round(qt(res$`Pr(>F)`[-1], Inf, lower.tail=F), 2)
+}))
+```
+
+
+
+
+AAAH random forey into segmenting the data based on state changes.
+
+```{r}
+plot.ts(cbind(rdats[runs==1,1],smooth.spline(rdats[runs==1,1], cv=F)$y), plot.type='single', col=1:2)
+sm.rdats <- rdats*0
+for (ri in runs) {
+  for (i in 1:ncol(rdats)) {
+    sm.rdats[runs==ri,i] <- smooth.spline(rdats[runs==ri,i])$y
+  }
+}
+plot.ts(sm.rdats[runs==1,1:4])
+tmp <- bcp(sm.rdats[runs==1,])
+tmp2 <- bcp(sm.rdats[runs==1,3])
+plot(tmp)
+plot(tmp2)
+
+tmp2 <- e.agglo(sm.rdats[runs==1,])
+tmp2 <- e.divisive(sm.rdats[runs==1,])
+plot(sm.rdats[runs==1,3], type='l')
+abline(v=tmp2$estimates, lty=3)
+
+tmp3 <- laply(seq(1,318,by=1), function(i) cor(rdats[i:(i+45-1),]))
+plot.ts(tmp3[,1,2:6], plot.type = "single", col=1:5)
+tmp4 <- sapply(1:dim(tmp3)[1], function(i) tmp3[i,,][lower.tri(tmp3[i,,])])
+btmp4 <- bcp(tmp4)
+plot(btmp4)
+```
+
+
+
+
+When we try this on all the subjects, we see that overall adding the 
+derivative does help for most of the subjects for the derivative but doesn't
+benefit for the dispersion parameter.
+
+```{r}
+res <- laply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  
+  vid.timing <- dat$basics$timing
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  # All faces
+  onsets0 <- vid.timing$onset
+  durs0   <- vid.timing$duration
+  
+  # Motion
+  mc <- load.mc(subj)
+  fd <- load.fds(subj)
+  
+  # Convolve
+  d1s <- convolve.spm.hrf(onsets0, durs0, tot.time, runs, frate=1/12)
+  
+  res <- t(sapply(1:ncol(rdats), function(i) {
+    fit1 <- lm(rdats[,i] ~ mc + fd + d1s[,1])
+    fit2 <- lm(rdats[,i] ~ mc + fd + d1s[,1:2])
+    fit3 <- lm(rdats[,i] ~ mc + fd + d1s[,1:3])
+    res <- anova(fit1, fit2, fit3)
+    ztvals <- c(summary(fit1)$coefficients[10,3], 
+                qt(c(res$`Pr(>F)`[-1]), Inf, lower.tail=F))
+    round(ztvals, 2)
+  }))
+  rownames(res) <- rnames
+  colnames(res) <- c("base", "deriv", "deriv+disp")
+  res
+}, .parallel=T)
+
+print(res)
+
+print(colSums(res[,,1]>2)) # how many had an effect with just the 1st
+print(colSums(res[,,2]>2))
+print(colSums(res[,,3]>2))
+```
+
+So now I want to try and see the effects of every possible voxel in just the pFFA. For many of the voxels, we see adding the derivative in each voxel's model improves the fit. But as before adding the dispersion is not helpful.
+
+```{r}
+res <- llply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  rdats <- dat$fmri$dat$r.pFFA
+  
+  vid.timing <- dat$basics$timing
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  # All faces
+  onsets0 <- vid.timing$onset
+  durs0   <- vid.timing$duration
+  
+  # Motion
+  mc <- load.mc(subj)
+  fd <- load.fds(subj)
+  
+  # Convolve
+  d1s <- convolve.spm.hrf(onsets0, durs0, tot.time, runs, frate=1/12)
+  
+  res <- t(sapply(1:ncol(rdats), function(i) {
+    fit1 <- lm(rdats[,i] ~ mc + fd + d1s[,1])
+    fit2 <- lm(rdats[,i] ~ mc + fd + d1s[,1:2])
+    fit3 <- lm(rdats[,i] ~ mc + fd + d1s[,1:3])
+    res <- anova(fit1, fit2, fit3)
+    ztvals <- c(summary(fit1)$coefficients[10,3], 
+                qt(c(res$`Pr(>F)`[-1]), Inf, lower.tail=F))
+    round(ztvals, 2)
+  }))
+  colnames(res) <- c("base", "deriv", "deriv+disp")
+  res
+}, .parallel=T)
+
+# Get proportion of significant voxels for each subject
+round(t(sapply(res, function(x) colMeans(x>2))), 3)*100
+```
+
+Now let's look at the right amygdala. Here the fit is strange so adding something like dispersion might help. We should note that not many of the voxels were not significant to begin with....so if we restrict the voxels, we see similarly poor effect of adding the derivative.
+
+```{r}
+res <- llply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  rdats <- dat$fmri$dat$r.Amyg
+  
+  vid.timing <- dat$basics$timing
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  # All faces
+  onsets0 <- vid.timing$onset
+  durs0   <- vid.timing$duration
+  
+  # Motion
+  mc <- load.mc(subj)
+  fd <- load.fds(subj)
+  
+  # Convolve
+  d1s <- convolve.spm.hrf(onsets0, durs0, tot.time, runs, frate=1/12)
+  
+  res <- t(sapply(1:ncol(rdats), function(i) {
+    fit1 <- lm(rdats[,i] ~ mc + fd + d1s[,1])
+    fit2 <- lm(rdats[,i] ~ mc + fd + d1s[,1:2])
+    fit3 <- lm(rdats[,i] ~ mc + fd + d1s[,1:3])
+    res <- anova(fit1, fit2, fit3)
+    ztvals <- c(summary(fit1)$coefficients[10,3], 
+                qt(c(res$`Pr(>F)`[-1]), Inf, lower.tail=F))
+    round(ztvals, 2)
+  }))
+  colnames(res) <- c("base", "deriv", "deriv+disp")
+  res
+}, .parallel=T)
+
+# Get proportion of significant voxels for each subject
+print(round(t(sapply(res, function(x) colMeans(x>2))), 3)*100)
+
+# look at the subset that are significant with base model
+pres <- sapply(res, function(x) colMeans(x[x[,1.5]>1,,drop=F]>2))
+print(round(t(pres), 3)*100)
+```
+
+### Trying FIR Style
+
+One possibility is that something akin to an FIR model might work better especially with the amygdala. We can make it so 
+
+```{r}
+gen.events
+
+fir.vals <- matrix(0, 20, 8)
+tpts <- seq(1,20,by=3)
+for (i in 1:length(tpts)) {
+  cat(i,"\n")
+  ti <- tpts[i]
+  inds <- (ti-2):(ti+2)
+  goods <- (inds > 0) & (inds <= nrow(fir.vals))
+  fir.vals[inds[goods],i] <- c(0.25,0.5,1,0.5,0.25)[goods]
+}
+
+fir_fun <- function(tpts, ci=1) {
+  fir.tpts <- matrix(0, length(tpts), ncol(fir.vals))
+  fir.tpts[1:nrow(fir.vals),] <- fir.vals
+  fir.tpts[,ci]
+}
+
+# CSPLIN
+afni.ret <- system("3dDeconvolve -x1D_stop -polort -1 -num_stimts 1 -nodata 22 1 -local_times -TR_times 1 -stim_times 1 '1D: 0' 'TENT(0,20,8)' -x1D stdout:", intern=T)
+afni.ret <- afni.ret[!grepl("^#", afni.ret)]
+afni.ret <- afni.ret[afni.ret!=""]
+afni.ret <- trimws(afni.ret)
+afni.ret <- t(sapply(strsplit(afni.ret, " "), as.numeric))
+afni.ret <- afni.ret[!apply(afni.ret, 1, function(x) all(x==0)),]
+plot.ts(afni.ret)
+nrow(afni.ret)
+
+afni_fun <- function(tpts, ci=1) {
+  afni.tpts <- vector("numeric", length(tpts))
+  afni.tpts[1:nrow(afni.ret)] <- afni.ret[,ci]
+  afni.tpts
+}
+
+s1    <- gen.events(onsets0, durs0, tot.time, frate=frate)
+d1s <- sapply(1:ncol(afni.ret), function(ci) {
+  c1 <- apply.convolve(s1, runs, hrf_fun=afni_fun, frate=frate, ci=ci)
+  d1 <- downsample(c1, frate=frate)
+  d1
+})
+
+ret <- lm(rdats[,3] ~ d1s)
+```
+
+```{r}
+# Try on all subjects
+
+## First get the results of using the first 2 parameter SPM model
+res0 <- laply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  
+  vid.timing <- dat$basics$timing
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  # All faces
+  onsets0 <- vid.timing$onset
+  durs0   <- vid.timing$duration
+  
+  # Motion
+  mc <- load.mc(subj)
+  fd <- load.fds(subj)
+  
+  # Convolve
+  d1s <- convolve.spm.hrf(onsets0, durs0, tot.time, runs, frate=1/12)
+  
+  res <- t(sapply(1:ncol(rdats), function(i) {
+    fit1 <- aov(rdats[,i] ~ mc + fd + d1s[,1:2])
+    ttvals <- sqrt(summary(fit1)[[1]]$`F value`[3])
+    round(ttvals, 2)
+  }))
+  #rownames(res) <- rnames
+  #colnames(res) <- c("base", "deriv", "deriv+disp")
+  res
+}, .parallel=T)
+colnames(res0) <- rnames
+res0
+
+## OK now run the tent business
+
+afni.ret <- system("3dDeconvolve -x1D_stop -polort -1 -num_stimts 1 -nodata 22 1 -local_times -TR_times 1 -stim_times 1 '1D: 0' 'TENT(0,20,8)' -x1D stdout:", intern=T)
+afni.ret <- afni.ret[!grepl("^#", afni.ret)]
+afni.ret <- afni.ret[afni.ret!=""]
+afni.ret <- trimws(afni.ret)
+afni.ret <- t(sapply(strsplit(afni.ret, " "), as.numeric))
+afni.ret <- afni.ret[!apply(afni.ret, 1, function(x) all(x==0)),]
+
+res1 <- laply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  
+  vid.timing <- dat$basics$timing
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  # All faces
+  onsets0 <- vid.timing$onset
+  durs0   <- vid.timing$duration
+  
+  # Motion
+  mc <- load.mc(subj)
+  fd <- load.fds(subj)
+  
+  # Convolve
+  d1s <- convolve.afni.hrf(onsets0, durs0, tot.time, runs, afni.ret=afni.ret, frate=1/12)
+  
+  res <- t(sapply(1:ncol(rdats), function(i) {
+    fit1 <- aov(rdats[,i] ~ mc + fd + d1s)
+    ttvals <- sqrt(summary(fit1)[[1]]$`F value`[3])
+    round(ttvals, 2)
+  }))
+  #names(res) <- rnames
+  #colnames(res) <- c("base", "deriv", "deriv+disp")
+  res
+}, .parallel=T)
+colnames(res1) <- rnames
+print(res1)
+
+## TRY CSPLIN
+afni.ret <- system("3dDeconvolve -x1D_stop -polort -1 -num_stimts 1 -nodata 22 1 -local_times -TR_times 1 -stim_times 1 '1D: 0' 'CSPLIN(0,20,8)' -x1D stdout:", intern=T)
+afni.ret <- afni.ret[!grepl("^#", afni.ret)]
+afni.ret <- afni.ret[afni.ret!=""]
+afni.ret <- trimws(afni.ret)
+afni.ret <- t(sapply(strsplit(afni.ret, " "), as.numeric))
+afni.ret <- afni.ret[!apply(afni.ret, 1, function(x) all(x==0)),]
+
+res2 <- laply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  
+  vid.timing <- dat$basics$timing
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  # All faces
+  onsets0 <- vid.timing$onset
+  durs0   <- vid.timing$duration
+  
+  # Motion
+  mc <- load.mc(subj)
+  fd <- load.fds(subj)
+  
+  # Convolve
+  d1s <- convolve.afni.hrf(onsets0, durs0, tot.time, runs, afni.ret=afni.ret, frate=1/12)
+  
+  res <- t(sapply(1:ncol(rdats), function(i) {
+    fit1 <- aov(rdats[,i] ~ mc + fd + d1s)
+    ttvals <- sqrt(summary(fit1)[[1]]$`F value`[3])
+    round(ttvals, 2)
+  }))
+  #names(res) <- rnames
+  #colnames(res) <- c("base", "deriv", "deriv+disp")
+  res
+}, .parallel=T)
+colnames(res2) <- rnames
+print(res2)
+
+
+## Try a shorter number of points
+afni.ret <- system("3dDeconvolve -x1D_stop -polort -1 -num_stimts 1 -nodata 22 1 -local_times -TR_times 1 -stim_times 1 '1D: 0' 'CSPLIN(0,16,6)' -x1D stdout:", intern=T)
+afni.ret <- afni.ret[!grepl("^#", afni.ret)]
+afni.ret <- afni.ret[afni.ret!=""]
+afni.ret <- trimws(afni.ret)
+afni.ret <- t(sapply(strsplit(afni.ret, " "), as.numeric))
+afni.ret <- afni.ret[!apply(afni.ret, 1, function(x) all(x==0)),]
+
+res3 <- laply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  
+  vid.timing <- dat$basics$timing
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  # All faces
+  onsets0 <- vid.timing$onset
+  durs0   <- vid.timing$duration
+  
+  # Motion
+  mc <- load.mc(subj)
+  fd <- load.fds(subj)
+  
+  # Convolve
+  d1s <- convolve.afni.hrf(onsets0, durs0, tot.time, runs, afni.ret=afni.ret, frate=1/12)
+  
+  res <- t(sapply(1:ncol(rdats), function(i) {
+    fit1 <- aov(rdats[,i] ~ mc + fd + d1s)
+    ttvals <- sqrt(summary(fit1)[[1]]$`F value`[3])
+    round(ttvals, 2)
+  }))
+  #names(res) <- rnames
+  #colnames(res) <- c("base", "deriv", "deriv+disp")
+  res
+}, .parallel=T)
+colnames(res3) <- rnames
+print(res3)
+
+```
+
+
+```{r}
+# Try this on all
+
+
+summary(lm(rdats[,3] ~ d1s))
+summary(lm(rdats[,3] ~ reg.d1))
+
+
+## Covars
+# Questions
+onsets3 <- vid.timing$onset[vid.timing$question!="none"]
+durs3   <- 4
+quests  <- convolve.hrf(onsets3, durs3, tot.time, runs)
+# Day of scan
+days <- factor(runs)
+days <- mapvalues(days, from=1:16, to=rep(1:4,each=4))
+days <- model.matrix(~days)[,-1] # matrix of 1s 0s ... no intercept
+# Repeat days (on the second and fourth day we repeat the stimuli)
+repeat.day <- factor(vid.timing$run)
+repeat.day <- mapvalues(repeat.day, from=1:16, to=rep(c(1,2,1,2),each=4))
+onsets4    <- vid.timing$onset[repeat.day==2]
+durs4      <- vid.timing$duration[repeat.day==2]
+repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs)
+# Motion
+mc <- load.mc(subj)
+fd <- load.fds(subj)
+
+# Fit
+fit <- aov(rdats[,3] ~ faces.all + quests + days + repeat.faces + mc)
+print(summary(fit))
+
+# Plot fit
+plot.ts(scale(cbind(rdats[,3], fit$fitted.values))[1:300,], plot.type="single", col=1:2)
+## residuals...seems to have signal within it!
+plot.ts(fit$residuals[1:300])
+```
+
+Now we begin to generate the regressors.
+
+```{r}
+#subj <- "sub01"
+#dat <- dat.vols$sub01
+
+sub.bs <- laply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  vid.timing <- dat$basics$timing
+  vnames <- levels(vid.timing$video)
+  
+  ## Covars (same throughout)
+  # Questions
+  onsets3 <- vid.timing$onset[vid.timing$question!="none"]
+  durs3   <- 4
+  quests  <- convolve.hrf(onsets3, durs3, tot.time, runs)
+  # Day of scan
+  days <- factor(runs)
+  days <- mapvalues(days, from=1:16, to=rep(1:4,each=4))
+  days <- model.matrix(~days)[,-1] # matrix of 1s 0s ... no intercept
+  # Repeat days (on the second and fourth day we repeat the stimuli)
+  repeat.day <- factor(vid.timing$run)
+  repeat.day <- mapvalues(repeat.day, from=1:16, to=rep(c(1,2,1,2),each=4))
+  onsets4    <- vid.timing$onset[repeat.day==2]
+  durs4      <- vid.timing$duration[repeat.day==2]
+  repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs)
+  # Motion
+  mc <- load.mc(subj)
+  fds <- load.fds(subj)
+  
+  # Loop through each video and process
+  system.time(vid.bs <- laply(vnames, function(vname) {
+    # Particular trial
+    onsets1   <- vid.timing$onset[vid.timing$video == vname]
+    durs1     <- vid.timing$duration[vid.timing$video == vname]
+    cur.trial <- convolve.spm.hrf(onsets1, durs1, tot.time, runs)
+    
+    # All other trials
+    onsets2 <- vid.timing$onset[vid.timing$video != vname]
+    durs2   <- vid.timing$duration[vid.timing$video != vname]
+    other.trials <- convolve.spm.hrf(onsets2, durs2, tot.time, runs)
+    
+    # Run regression
+    dmat <- model.matrix(~cur.trial + other.trials + quests + days + repeat.faces + mc + fds)
+    ret.fit <- simple_lm(rdats, dmat)
+    
+    # Get the betas and tvals for the current trial estimate
+    bs <- ret.fit$b[2,]
+    ts <- ret.fit$tvals[2,]
+    
+    cbind(betas=bs, tvals=ts)
+  }, .parallel=T))
+  dimnames(vid.bs)[[1]] <- vnames
+  names(dimnames(vid.bs)) <- c("vid", "roi", "measure")
+  
+  return(vid.bs)
+}, .progress="text")
+```

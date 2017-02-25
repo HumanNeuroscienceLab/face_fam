@@ -1,0 +1,465 @@
+---
+title: "Calculate Beta Series"
+author: "Zarrar Shehzad"
+date: "February 18, 2017"
+output: html_document
+---
+
+I want to use the separate GLM design to calculate the beta-series. I want to 
+also include the questions regressor as well as a regressor for the first vs
+second repeats.
+
+## Setup
+
+```{r}
+# Path for my own packages
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+
+# General workhorse function
+library(plyr)
+
+# Parallelization
+suppressMessages(library(doMC))
+registerDoMC(24)
+
+# If we were to use ggplot2 and other plotting needs
+library(RColorBrewer)
+library(ggplot2)
+source("/data1/famface01/command/encoding/FirstPass/plot_functions.R")
+
+# This gets us the simple_lm function for faster GLMs
+source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
+
+## For heatmap.2
+#suppressMessages(library(gplots))
+## For our own custom convolution
+#source("/data1/famface01/command/encoding/ShapesAnalysis/000_funs_load_convolve.R")
+```
+
+And some general variable of interest.
+
+```{r}
+subjects <- sprintf("sub%02i", 1:6) # again skipping sub01
+#indir    <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+rnames   <- c("r.vATL","r.aFFA", "r.pFFA", "r.OFA", "r.EBA", 'r.Amyg', 
+              "l.vATL", "l.FFA", "l.OFA", "l.EBA", 'l.Amyg')
+```
+
+
+```{r}
+library(glmnet)
+
+get_bestfit <- function(cvfit, type.measure, exclude.zero=FALSE) {
+  bestouts <- cvfit$measures[[type.measure]]
+  extreme  <- ifelse(type.measure == "rmse", min, max)
+  
+  if (exclude.zero) {
+    val <- extreme(bestouts[cvfit$nzero>0])
+  } else {
+    val <- extreme(bestouts)
+  }
+  
+  ind <- which(bestouts == val)
+  
+  bestfit  <- list(
+    measure = type.measure, 
+    val     = val, 
+    ind     = ind, 
+    lam     = cvfit$lambda[ind], 
+    preval  = cvfit$fit.preval[,ind], 
+    nzero   = cvfit$nzero[ind], 
+    coef    = coef(cvfit, s=cvfit$lambda[ind])
+  )
+  bestfit
+}
+
+run_cvglmnet <- function(X, y, keep=T, parallel=T, type.measure="rsq", exclude.zero=FALSE, ...) 
+{
+  if (!(type.measure %in% c("rsq", "r", "rmse"))) stop("unknown type.measure: ", type.measure)
+  
+  rmse <- function(x1, x2) sqrt(mean((x1-x2)^2))
+  
+  #cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel)
+  cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel, ...)
+  
+  rs     <- sapply(1:length(cvfit$lambda), function(i) cor(cvfit$fit.preval[,i], y))
+  rsqs   <- rs^2
+  rmses  <- sapply(1:length(cvfit$lambda), function(i) rmse(cvfit$fit.preval[,i], y))
+  cvfit$measures <- list(
+    r = rs, 
+    rsq = rsqs, 
+    rmse = rmses
+  )
+  
+  cvfit$bestfit <- get_bestfit(cvfit, type.measure, exclude.zero)
+  
+  return(cvfit)
+}
+```
+
+### Load
+
+Load the ROI data and timing etc information.
+
+```{r}
+load.cur <- function(subj) {
+  indir <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+  infile <- sprintf("%s/roi_n_more_%s.rda", indir, subj)
+  dat <- NULL
+  load(infile)
+  dat
+}
+
+dat.vols <- lapply(subjects, load.cur)
+names(dat.vols) <- subjects
+```
+
+Also load the features.
+
+```{r}
+indir <- "/data1/famface01/analysis/misc/320_roi_task_activity"
+load(file.path(indir, "20_predict_face_feats.rda"))
+```
+
+## Design Matrix
+
+Let's setup the design matrices.
+
+```{r}
+source("/data1/famface01/command/encoding/ShapesAnalysis/000_funs_load_convolve.R")
+
+#' mags => magnitudes, can be a value, vector, or matrix. if matrix each column is some vector
+#' frate indicates how much to upsample
+gen.events <- function(onsets, durs, tot.time, mags=1, frate=1/24)
+{
+  # For comparison:
+  # neuRosim::stimfunction(tot.time, onsets, durs, frate)
+  
+  if (length(mags) == 1) mags <- rep(mags, length(onsets))
+  if (length(durs) == 1) durs <- rep(durs, length(onsets))
+  if (length(onsets) != length(durs)) stop("onsets and durs must be same length")
+  mags <- as.matrix(mags)
+  nc <- ncol(mags)
+  
+  # Upsample the features (faster way to do this?)
+  ## setup upsampled data
+  up.feats <- matrix(0, round(tot.time/frate), nc)
+  ## find new indices to put things
+  onsets  <- round(onsets/frate + 1)
+  durs    <- round(durs/frate)
+  offsets <- sapply(1:length(onsets), function(i) max(onsets[i] + durs[i] - 1, onsets[i]))
+  offsets[offsets > nrow(up.feats)] <- nrow(up.feats)
+  ns      <- offsets - onsets + 1
+  up.inds <- unlist(lapply(1:length(onsets), function(i) onsets[i]:offsets[i]))
+  ## corresponding indices in regularly sampled data
+  reg.inds<- rep(1:length(onsets), ns)
+  ## upsample
+  up.feats[up.inds,] <- mags[reg.inds,]
+  
+  return(up.feats)
+}
+
+
+apply.convolve <- function(up.feats, runs, frate=1/24, parallel=F) {
+  library(neuRosim)
+  
+  # Get the HRF to convolve
+  uruns    <- sort(unique(runs))
+  nruns    <- max(uruns)
+  ntpts    <- sum(runs==uruns[1])
+  tpts     <- seq(frate, ntpts, frate) # 318 * 16runs = 2288 * 24frames
+  chrf     <- canonicalHRF(tpts, verbose = FALSE)
+  up.runs <- rep(1:nruns, each=length(tpts))
+  
+  # Convolve
+  conv.up.feats <- llply(1:nruns, function(irun) {
+    ys <- up.feats[up.runs==irun,,drop=F]
+    ys <- ys[nrow(ys):1,,drop=F] # same as rev to each column
+    s.convs <- convolve.mfftw(chrf, ys)
+    for (i in 1:ncol(s.convs)) {
+      s.convs[,i] <- s.convs[,i]/max(s.convs[,i]) # normalize
+      s.convs[is.na(s.convs[,i]),i] <- 0
+    }
+    s.convs
+  }, .parallel=parallel) # TODO: test if parallel is actually faster!
+  conv.up.feats <- do.call(rbind, conv.up.feats)
+  conv.up.feats <- as.matrix(conv.up.feats)
+  
+  return(conv.up.feats)
+}
+
+downsample <- function(up.dat, tr=1, frate=1/24) {
+  ix <- seq(1, nrow(up.dat), tr/frate)
+  down.dat <- up.dat[ix,,drop=F]
+  return(down.dat)
+}
+
+convolve.hrf <- function(onsets, durs, tot.time, runs, 
+                         mags=1, frate=1/24, tr=1, parallel=F)
+{
+  s1 <- gen.events(onsets, durs, tot.time, mags, frate)
+  c1 <- apply.convolve(s1, runs, frate, parallel)
+  d1 <- downsample(c1, tr, frate)
+  return(d1)
+}
+
+load.mc <- function(subj) {
+  funcdir  <- file.path("/data1/famface01/analysis/preprocessed", subj, "func")
+  df.paths <- read.table(file.path(funcdir, "df_paths.txt"), header=T)
+  inds     <- df.paths$inindex[df.paths$name == "unfam_vids"]
+  fpaths   <- sprintf("%s/mc/func_run%02i_dfile.1D", funcdir, inds)
+  
+  mcs <- ldply(fpaths, function(fpath) {
+    x <- read.table(fpath)
+    x <- as.matrix(x)
+    x <- scale(x, scale=F, center=T)
+    x
+  })
+  mcs <- as.matrix(mcs)
+  
+  colnames(mcs) <- c("roll", "pitch", "yaw", "dS", "dL", "dP")
+  
+  mcs
+}
+
+load.fds <- function(subj) {
+  funcdir  <- file.path("/data1/famface01/analysis/preprocessed", subj, "func")
+  df.paths <- read.table(file.path(funcdir, "df_paths.txt"), header=T)
+  inds     <- df.paths$inindex[df.paths$name == "unfam_vids"]
+  
+  fpaths   <- sprintf("%s/mc/func_run%02i_fd_rel.1D", funcdir, inds)
+  fds_rel  <- ldply(fpaths, function(fpath) {
+    x <- read.table(fpath)
+    x <- as.matrix(x)
+    x <- scale(x, scale=F, center=T)
+    x
+  })
+  fds_rel <- as.matrix(fds_rel)
+  
+  fpaths   <- sprintf("%s/mc/func_run%02i_fd_abs.1D", funcdir, inds)
+  fds_abs  <- ldply(fpaths, function(fpath) {
+    x <- read.table(fpath)
+    x <- as.matrix(x)
+    x <- scale(x, scale=F, center=T)
+    x
+  })
+  fds_abs <- as.matrix(fds_abs)
+  
+  cbind(rel=fds_rel, abs=fds_abs)
+}
+```
+
+The code below can be expanded to better understand the fit.
+
+```{r}
+subj <- "sub01"
+dat <- dat.vols$sub01
+rdats <- sapply(dat$fmri$dat, rowMeans)
+
+vid.timing <- dat$basics$timing
+vnames <- levels(vid.timing$video)
+
+runs <- dat$fmri$runs
+tot.time <- length(runs)
+
+# All faces
+onsets0 <- vid.timing$onset
+durs0   <- vid.timing$duration
+faces.all <- convolve.hrf(onsets0, durs0, tot.time, runs)
+
+## Covars
+# Questions
+onsets3 <- vid.timing$onset[vid.timing$question!="none"]
+durs3   <- 4
+quests  <- convolve.hrf(onsets3, durs3, tot.time, runs)
+# Day of scan
+days <- factor(runs)
+days <- mapvalues(days, from=1:16, to=rep(1:4,each=4))
+days <- model.matrix(~days)[,-1] # matrix of 1s 0s ... no intercept
+# Repeat days (on the second and fourth day we repeat the stimuli)
+repeat.day <- factor(vid.timing$run)
+repeat.day <- mapvalues(repeat.day, from=1:16, to=rep(c(1,2,1,2),each=4))
+onsets4    <- vid.timing$onset[repeat.day==2]
+durs4      <- vid.timing$duration[repeat.day==2]
+repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs)
+# Motion
+mc <- load.mc(subj)
+fd <- load.fds(subj)
+
+# Fit
+fit <- aov(rdats[,3] ~ faces.all + quests + days + repeat.faces + mc)
+print(summary(fit))
+
+# Plot fit
+plot.ts(scale(cbind(rdats[,3], fit$fitted.values))[1:300,], plot.type="single", col=1:2)
+## residuals...seems to have signal within it!
+plot.ts(fit$residuals[1:300])
+```
+
+Now we begin to generate the regressors.
+
+```{r}
+#subj <- "sub01"
+#dat <- dat.vols$sub01
+
+sub.bs <- laply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  vid.timing <- dat$basics$timing
+  vnames <- levels(vid.timing$video)
+  
+  ## Covars (same throughout)
+  # Questions
+  onsets3 <- vid.timing$onset[vid.timing$question!="none"]
+  durs3   <- 4
+  quests  <- convolve.hrf(onsets3, durs3, tot.time, runs)
+  # Day of scan
+  days <- factor(runs)
+  days <- mapvalues(days, from=1:16, to=rep(1:4,each=4))
+  days <- model.matrix(~days)[,-1] # matrix of 1s 0s ... no intercept
+  # Repeat days (on the second and fourth day we repeat the stimuli)
+  repeat.day <- factor(vid.timing$run)
+  repeat.day <- mapvalues(repeat.day, from=1:16, to=rep(c(1,2,1,2),each=4))
+  onsets4    <- vid.timing$onset[repeat.day==2]
+  durs4      <- vid.timing$duration[repeat.day==2]
+  repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs)
+  # Motion
+  mc <- load.mc(subj)
+  fds <- load.fds(subj)
+  
+  # Loop through each video and process
+  system.time(vid.bs <- laply(vnames, function(vname) {
+    # Particular trial
+    onsets1   <- vid.timing$onset[vid.timing$video == vname]
+    durs1     <- vid.timing$duration[vid.timing$video == vname]
+    cur.trial <- convolve.hrf(onsets1, durs1, tot.time, runs)
+    
+    # All other trials
+    onsets2 <- vid.timing$onset[vid.timing$video != vname]
+    durs2   <- vid.timing$duration[vid.timing$video != vname]
+    other.trials <- convolve.hrf(onsets2, durs2, tot.time, runs)
+    
+    # Run regression
+    dmat <- model.matrix(~cur.trial + other.trials + quests + days + repeat.faces + mc + fds)
+    ret.fit <- simple_lm(rdats, dmat)
+    
+    # Get the betas and tvals for the current trial estimate
+    bs <- ret.fit$b[2,]
+    ts <- ret.fit$tvals[2,]
+    
+    cbind(betas=bs, tvals=ts)
+  }, .parallel=T))
+  dimnames(vid.bs)[[1]] <- vnames
+  names(dimnames(vid.bs)) <- c("vid", "roi", "measure")
+  
+  return(vid.bs)
+}, .progress="text")
+```
+
+
+
+Not sure how I can check if averaging across subjects is a good thing...
+
+But here I will average across subjects and make some plots.
+
+```{r}
+grp.bs <- apply(sub.bs, 2:4, mean) # vids x rois x (betas/tvals)
+
+cols <- brewer.pal(10, "RdBu")
+heatmap(grp.bs[,,2], scale="none", labRow = F, col=rev(cols), Colv=NA)
+heatmap(scale(grp.bs[,,2]), scale="none", labRow = F, col=rev(cols))
+
+heatmap(grp.bs[,,1], scale="none", labRow = F, col=rev(cols))
+heatmap(scale(grp.bs[,,1]), scale="none", labRow = F, col=rev(cols))
+```
+
+
+
+
+
+
+
+
+
+Apply the betas to some features.
+
+```{r}
+# Now let's try and see the effects of applying some regressor
+base    <- "/data1/famface01/analysis/encoding/12_Features"
+traits  <- read.csv(sprintf('%s/personality_traits_grpave.csv', base))
+trait.vnames <- as.character(traits[,1])
+all.equal(vnames, trait.vnames) # no need to re-order
+traits  <- traits[,-1]
+fac.traits <- psych::fa(traits, nfactors=6, residuals=T, rotate='varimax', 
+                        fm='minres')
+trait.scores <- fac.traits$scores
+
+# Rearrange inds from the predict face feats file
+inds <- sapply(vnames, function(vname) which(demo.vnames==vname))
+all.equal(demo.vnames[inds], vnames)
+pca.face.feats <- pca.face.feats[inds,]
+fac.scores     <- fac.scores[inds,]
+fac.preds      <- fac.preds[inds,]
+fac.resids     <- fac.resids[inds,]
+
+# see if can cluster the fac.scores
+library(dynamicTreeCut)
+cmat <- cor(fac.scores)
+dmat <- sqrt(2*(1-cmat)^2)
+d <- as.dist(dmat)
+#d <- dist(t(fac.scores))
+#dmat <- as.matrix(d)
+hc <- hclust(d, method="ward.D2")
+cl <- cutreeDynamic(hc, distM=dmat)
+table(cl) # so all one!
+
+# Apply another pca to face feats to reduce it
+pca.feats2 <- prcomp(pca.face.feats, retx=T)$x
+## compare ... seems like having full set is useful
+summary(aov(vid.bs[,3,1] ~ pca.face.feats))
+summary(aov(vid.bs[,3,1] ~ pca.feats2))
+summary(aov(vid.bs[,3,1] ~ pca.feats2[,1:133]))
+summary(aov(vid.bs[,3,1] ~ pca.feats2[,1:100]))
+summary(aov(vid.bs[,3,1] ~ pca.feats2[,1:50]))
+
+# Compare
+fit <- aov(vid.bs[,1:6,1] ~ pca.face.feats + trait.scores)
+summary(fit)
+
+# Can get nice results for individual terms
+summary(lm(vid.bs[,3,1] ~ trait.scores))
+
+# Note the fits are just not that great
+summary(aov(vid.bs[,3,1] ~ trait.scores))
+summary(aov(vid.bs[,3,1] ~ pca.face.feats + trait.scores))
+
+# Try hierarchical
+tmp1 <- lm(vid.bs[,3,1] ~ pca.face.feats)$fitted.values
+tmp2 <- lm(vid.bs[,3,1] ~ trait.scores)$fitted.values
+summary(aov(vid.bs[,3,1] ~ pca.face.feats + trait.scores)) # orig
+summary(aov(vid.bs[,3,1] ~ tmp1 + tmp2)) # yeah this is proly overfit
+
+# Let's try classification. So this is looking nicer.
+classify1 <- run_cvglmnet(pca.face.feats, vid.bs[,3,1], alpha=1)
+classify2 <- run_cvglmnet(trait.scores, vid.bs[,3,1], alpha=1) # just consistent
+classify3 <- run_cvglmnet(fac.preds, vid.bs[,3,1], alpha=1) # just
+classify4 <- run_cvglmnet(fac.resids, vid.bs[,3,1], alpha=1) # just
+classify1$bestfit$val # pca face feats
+classify2$bestfit$val # haha this is better!
+classify3$bestfit$val
+classify4$bestfit$val
+## now let's hierarchically compare them
+summary(lm(vid.bs[,3,1] ~ classify1$bestfit$preval + classify2$bestfit$preval + classify3$bestfit$preval + classify4$bestfit$preval))
+summary(lm(vid.bs[,3,1] ~ classify1$bestfit$preval + classify3$bestfit$preval + classify4$bestfit$preval))
+summary(aov(vid.bs[,3,1] ~ classify1$bestfit$preval + classify3$bestfit$preval + classify4$bestfit$preval)) # note at SSQ
+
+
+# So what now. we can get these fits here.
+```
+

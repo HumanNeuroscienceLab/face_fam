@@ -1,0 +1,514 @@
+---
+title: "Trait factors given face features"
+author: "Zarrar Shehzad"
+date: "February 15, 2017"
+output:
+  html_document:
+    toc: yes
+---
+
+## Overview
+
+Something about what's going on here.
+
+## Setup
+
+Load a bunch of packages and functions.
+
+```{r}
+# Path for my own packages
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+
+# General workhorse function
+library(plyr)
+
+# Parallelization
+suppressMessages(library(doMC))
+registerDoMC(24)
+
+# If we were to use ggplot2 and other plotting needs
+library(RColorBrewer)
+library(ggplot2)
+source("/data1/famface01/command/encoding/FirstPass/plot_functions.R")
+
+# This gets us the simple_lm function for faster GLMs
+source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
+
+## For heatmap.2
+#suppressMessages(library(gplots))
+## For our own custom convolution
+#source("/data1/famface01/command/encoding/ShapesAnalysis/000_funs_load_convolve.R")
+```
+
+And some general variable of interest.
+
+```{r}
+subjects <- sprintf("sub%02i", 1:6) # again skipping sub01
+#indir    <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+rnames   <- c("r.vATL","r.aFFA", "r.pFFA", "r.OFA", "r.EBA", 'r.Amyg', 
+              "l.vATL", "l.FFA", "l.OFA", "l.EBA", 'l.Amyg')
+```
+
+
+### Load
+
+First, get the ROI data.
+
+```{r}
+load.cur <- function(subj) {
+  indir <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+  infile <- sprintf("%s/roi_n_more_%s.rda", indir, subj)
+  dat <- NULL
+  load(infile)
+  dat
+}
+
+dat.vols <- lapply(subjects, load.cur)
+names(dat.vols) <- subjects
+```
+
+Second, get the AFNI design matrix from our voxelwise analysies.
+
+```{r}
+get.xmat.labs <- function(fn) {
+  str <- system(sprintf("grep ColumnLabels %s | sed s/'#  ColumnLabels = '//", fn), intern=T)
+  str <- gsub("\"", "", str)
+  cols <- strsplit(str, ' ; ')[[1]]
+  cols
+}
+
+xmat_template <- "/data1/famface01/analysis/task_activity/%s/face_basics_unfam/traitsfa_givenshape.reml/xmat.1D"
+lst.xmats <- lapply(subjects, function(subj) {
+  xmat_file <- sprintf(xmat_template, subj)
+  xmat <- read.table(xmat_file)
+  
+  # Format the columnnames
+  colnames(xmat) <- get.xmat.labs(xmat_file)
+  colnames(xmat) <- sub("#0$", "", colnames(xmat))
+  colnames(xmat) <- sub("Pol$", "", colnames(xmat))
+  
+  # Remove the run vars since we centered our data
+  xmat <- xmat[,-grep("^Run", colnames(xmat))]
+  
+  xmat
+})
+xmats <- do.call(rbind, lst.xmats)
+
+# Add a factor for subjects
+subvar <- lapply(1:length(lst.xmats), function(i) rep(subjects[i],nrow(lst.xmats[[i]])))
+subvar <- unlist(subvar)
+xmats  <- cbind(subject=subvar, xmats)
+## create a second version where expand the subject variable
+subvar2 <- as.matrix(model.matrix(model.frame(~subvar)))
+xmats2 <- cbind(subvar2, xmats[,-1])
+
+# Let's take a peak
+head(xmats)
+```
+
+Finally load the trait factors as a reference.
+
+```{r}
+trait.df <- load.traits()
+trait.fa <- factanal(trait.df, factors = 6, rotation = "varimax", 
+                     na.action = na.omit, scores="regression")
+
+# plot it
+library(corrplot)
+hc1     <- hclust(dist(trait.fa$loadings))
+hc1     <- as.dendrogram(hc1)
+ord.hc1 <- order.dendrogram(hc1)
+loading <- trait.fa$loadings[ord.hc1,]
+col <- rev(colorRampPalette(c("#67001F", "#B2182B", "#D6604D", 
+                            "#F4A582", "#FDDBC7", "#FFFFFF", "#D1E5F0", "#92C5DE", 
+                            "#4393C3", "#2166AC", "#053061"))(200))
+corrplot(loading, tl.col='black', tl.cex=.75, diag=T, col=col, is.corr=T)
+```
+
+Based on this plot, we can have some labels for each factor
+
+```{r}
+fac.labs <- c("Unemotional", "Competent", "Trustworthy", 
+              "Memorable", 'Typical', 'Attractive')
+fac.labs2 <- sprintf("%s Factor", fac.labs)
+```
+
+Oh and one more thing, let's load the raw trait factor scores as regressors. This
+has been done before so just loading it in.
+
+```{r}
+base1 <- '/data1/famface01/command/misc/face_representations/300_task_activity/150_face_basics_unfam/'
+rdafile <- file.path(base1, "42_trait_n_rois_convolve.rda")
+load(rdafile) # see `conv.traitsfa`
+```
+
+
+## ROI Time-Series
+
+### Average
+
+We compile the average of each ROI (for now).
+
+```{r}
+lst.rdats <- lapply(dat.vols, function(dat) {
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  rdats
+})
+rdats <- do.call(rbind, lst.rdats)
+```
+
+### Model Fitting
+
+Run a regression followed by some contrasts.
+
+```{r}
+fit <- simple_lm(rdats, xmats2)
+tvals <- fit$tvals[-c(1:6,7:8,21:26),,drop=F]
+barplot(tvals, beside = T)
+```
+
+#### Contrast: Shape/Texture > Resid
+
+We will do something a little funny with the contrasts. I want to compare the 
+shape/texture > residual results for the absolute t-value not the based on the
+signed data. So to get this to work, I'm flipping my contrasts if the t-value
+is negative for either shape/texture or residuals. This has the effect of 
+comparing the absolute values of the fit for that regressor.
+
+```{r}
+cfit1.tvals <- sapply(1:ncol(rdats), function(i) {
+  fit <- simple_lm(rdats[,i], xmats2)
+  tvals <- fit$tvals[-c(1:6,7:8,21:26),,drop=F]
+  
+  # contrasts: shape > resid
+  cons1 <- matrix(0, 6, nrow(fit$b))
+  diag(cons1[,grep("shape_", colnames(xmats2))]) <- 1 * sign(tvals[1:6])
+  diag(cons1[,grep("resid_", colnames(xmats2))]) <- -1 * sign(tvals[-c(1:6)])
+  cfit1 <- simple_contrasts(fit, cons1)
+  cfit1$tvals
+})
+colnames(cfit1.tvals) <- rnames
+
+#fit <- simple_lm(rdats, xmats2)
+#tvals <- fit$tvals[-c(1:6,7:8,21:26),,drop=F]
+## contrasts: shape > resid
+#cons1 <- matrix(0, 6, nrow(fit$b))
+#diag(cons1[,grep("shape_", colnames(xmats2))]) <- 1 
+#diag(cons1[,grep("resid_", colnames(xmats2))]) <- -1
+#cfit1 <- simple_contrasts(fit, cons1)
+
+## contrasts: shape + resid
+#cons2 <- matrix(0, 6, nrow(fit$b))
+#diag(cons2[,grep("shape_", colnames(xmats2))]) <- 0.5
+#diag(cons2[,grep("resid_", colnames(xmats2))]) <- 0.5
+#cfit2 <- simple_contrasts(fit, cons2)
+#cfit2$tvals
+
+# plot
+plot.ts(cbind(scale(rdats[,1]), scale(fitted(fit2)))[1:100,], plot.type = "single", col=2:3)
+```
+
+#### Contrast: Shape/Texture + Resid
+
+We also want to run a contrast using the combined shape/texture and residual results. So this would be
+used for the overall fit.
+
+```{r}
+# Get the regressors together
+traitsfa <- do.call(rbind, conv.traitsfa)
+colnames(traitsfa) <- sprintf("trait%i", 1:6)
+xmats3 <- xmats2[,-grep("_trait", colnames(xmats2))] # remove shape/resid
+xmats3 <- cbind(xmats3, traitsfa) # add in the only trait factors
+
+# Fit the model
+cfit2 <- simple_lm(rdats, xmats3)
+cfit2.tvals <- cfit2$tvals[15:20,]
+```
+
+## Plotting
+
+### Setup
+
+We have to convert the different results into data frames for plotting later. First, we compile the tvals
+for the shpae/residual data.
+
+```{r}
+tvals <- fit$tvals[-c(1:6,7:8,21:26),]
+df.tvals0 <- reshape2::melt(tvals)
+
+# split up the first column that has shape_trait1 etc
+out.type <- sub("_trait[0-9]", "", df.tvals0[,1])
+fac.num <- as.numeric(sub("[a-z_]*", "", df.tvals0[,1]))
+#fac.name <- fac.labs[fac.num]
+fac.name <- sprintf("%i-%s", 1:6, fac.labs)[fac.num]
+
+# get the hemisphere and rename the ROI column
+hemis <- substr(df.tvals0[,2], 0, 1)
+rois  <- sub("[.]", " ", df.tvals0[,2])
+
+# remake the df
+df.tvals <- data.frame(Regressor=out.type, Factor=fac.name, Hemi=hemis, ROI=rois, Tstat=df.tvals0[,3])
+df.tvals$Regressor <- factor(df.tvals$Regressor, levels=c("shape", "resid"))
+df.tvals$ROI <- factor(df.tvals$ROI, levels=sub("[.]", " ", rnames))
+
+head(df.tvals)
+```
+
+Now we get the data-frames for the contrasts.
+
+```{r}
+## CONTRASTS 1
+df.tvals0 <- reshape2::melt(cfit1$tvals)
+# First column is the contrast of a factor, rename
+fac.name <- sprintf("%i-%s", 1:6, fac.labs)[df.tvals0[,1]]
+# Second column are the hemis and ROI renames
+hemis <- substr(df.tvals0[,2], 0, 1)
+rois  <- sub("[.]", " ", df.tvals0[,2])
+# Put it together
+df.tvals1 <- data.frame(Factor=fac.name, Hemi=hemis, ROI=rois, Tstat=df.tvals0[,3])
+df.tvals1$ROI <- factor(df.tvals1$ROI, levels=sub("[.]", " ", rnames)) # make the order right!
+
+## CONTRASTS 2
+df.tvals0 <- reshape2::melt(cfit2.tvals)
+# First column is the contrast of a factor, rename
+fac.name <- sprintf("%i-%s", 1:6, fac.labs)[as.numeric(sub("trait", "", df.tvals0[,1]))]
+# Second column are the hemis and ROI renames
+hemis <- substr(df.tvals0[,2], 0, 1)
+rois  <- sub("[.]", " ", df.tvals0[,2])
+# Put it together
+df.tvals2 <- data.frame(Factor=fac.name, Hemi=hemis, ROI=rois, Tstat=df.tvals0[,3])
+df.tvals2$ROI <- factor(df.tvals2$ROI, levels=sub("[.]", " ", rnames)) # make the order right!
+```
+
+### Overall Effect
+
+Let's start by looking at the overall effect. The first plot below is for the 
+right hemisphere followed by ones for the left-hemisphere. Note that the scale
+is kept to be the same on the left and right hemisphere.
+
+```{r}
+ggplot(subset(df.tvals2, Hemi=='r'), aes(x=Factor, y=Tstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed', color="grey50") + 
+  facet_wrap(~ROI) + 
+  ylab("T-statistic") + ylim(min(df.tvals2$Tstat), max(df.tvals2$Tstat)) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(subset(df.tvals2, Hemi=='l'), aes(x=Factor, y=Tstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed', color="grey50") + 
+  facet_wrap(~ROI) + 
+  ylab("T-statistic") + ylim(min(df.tvals2$Tstat), max(df.tvals2$Tstat)) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+### Raw T-Vals
+
+#### Effect of Shape/Texture
+
+We only look at the predicted trait factors based on shape/texture information.
+Note that the scale here is the same not only for the left/right hemisphere but
+also for the residuals plots later.
+
+```{r}
+ggplot(subset(df.tvals, Hemi=='r' & Regressor=='shape'), aes(x=Factor, y=Tstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed', color="grey50") + 
+  facet_wrap(~ROI) + 
+  ylab("Shape/Texture T-statistic") + ylim(min(df.tvals$Tstat), max(df.tvals$Tstat)) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(subset(df.tvals, Hemi=='l' & Regressor=='shape'), aes(x=Factor, y=Tstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed', color="grey50") + 
+  facet_wrap(~ROI) + 
+  ylab("Shape/Texture T-statistic") + ylim(min(df.tvals$Tstat), max(df.tvals$Tstat)) +  
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+#### Effect of Residuals
+
+```{r}
+ggplot(subset(df.tvals, Hemi=='r' & Regressor=='resid'), aes(x=Factor, y=Tstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed', color="grey50") + 
+  facet_wrap(~ROI) + 
+  ylab("Residual T-statistic") + ylim(min(df.tvals$Tstat), max(df.tvals$Tstat)) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(subset(df.tvals, Hemi=='l' & Regressor=='resid'), aes(x=Factor, y=Tstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed', color="grey50") + 
+  facet_wrap(~ROI) + 
+  ylab("Residual T-statistic") + ylim(min(df.tvals$Tstat), max(df.tvals$Tstat)) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+#### Combine
+
+For seeing both things together.
+
+```{r}
+ggplot(subset(df.tvals, Hemi=='r'), aes(x=Factor, y=Tstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor, alpha=Regressor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed', color="grey50") + 
+  facet_wrap(~ROI) + 
+  ylab("T-statistic") + ylim(min(df.tvals$Tstat), max(df.tvals$Tstat)) + 
+  bar_theme() + 
+  scale_alpha_manual(values=c(1, 0.4)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(subset(df.tvals, Hemi=='l'), aes(x=Factor, y=Tstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor, alpha=Regressor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed', color="grey50") + 
+  facet_wrap(~ROI) + 
+  ylab("T-statistic") + ylim(min(df.tvals$Tstat), max(df.tvals$Tstat)) + 
+  bar_theme() + 
+  scale_alpha_manual(values=c(1, 0.4)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+
+
+### Raw T-Vals
+
+#### Effect of Shape/Texture
+
+We only look at the predicted trait factors based on shape/texture information.
+Note that the scale here is the same not only for the left/right hemisphere but
+also for the residuals plots later.
+
+```{r}
+ggplot(subset(df.tvals, Hemi=='r' & Regressor=='shape'), aes(x=Factor, y=abs(Tstat))) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  facet_wrap(~ROI) + 
+  ylab("Shape/Texture Abs(T-stat)") + ylim(0, max(abs(df.tvals$Tstat))) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(subset(df.tvals, Hemi=='l' & Regressor=='shape'), aes(x=Factor, y=abs(Tstat))) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  facet_wrap(~ROI) + 
+  ylab("Shape/Texture Abs(T-stat)") + ylim(0, max(abs(df.tvals$Tstat))) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+#### Effect of Residuals
+
+```{r}
+ggplot(subset(df.tvals, Hemi=='r' & Regressor=='resid'), aes(x=Factor, y=abs(Tstat))) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  facet_wrap(~ROI) + 
+  ylab("Residual abs(T-stat)") + ylim(0, max(abs(df.tvals$Tstat))) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(subset(df.tvals, Hemi=='l' & Regressor=='resid'), aes(x=Factor, y=abs(Tstat))) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  facet_wrap(~ROI) + 
+  ylab("Residual abs(T-stat)") + ylim(0, max(abs(df.tvals$Tstat))) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+#### Combine
+
+For seeing both things together.
+
+```{r}
+ggplot(subset(df.tvals, Hemi=='r'), aes(x=Factor, y=abs(Tstat))) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor, alpha=Regressor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  facet_wrap(~ROI) + 
+  ylab("abs(T-stat)") + ylim(0, max(abs(df.tvals$Tstat))) + 
+  bar_theme() + 
+  scale_alpha_manual(values=c(1, 0.4)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(subset(df.tvals, Hemi=='l'), aes(x=Factor, y=abs(Tstat))) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor, alpha=Regressor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  facet_wrap(~ROI) + 
+  ylab("abs(T-stat)") + ylim(0, max(abs(df.tvals$Tstat))) + 
+  bar_theme() + 
+  scale_alpha_manual(values=c(1, 0.4)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+#### Feats > Resids
+
+And we can see the contrast between the two. Note if feats > resid is positive
+but feats + resid is negative, then we should slip this...so basically we are
+looking at abs(feats) > abs(resid).
+
+```{r}
+df.tvals1$AbsTstat <- df.tvals1$Tstat * sign(df.tvals2$Tstat)
+
+ggplot(subset(df.tvals1, Hemi=='r'), aes(x=Factor, y=AbsTstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed', color="grey50") + 
+  facet_wrap(~ROI) + 
+  ylab("Feats > Resid T-statistic") + ylim(min(df.tvals1$AbsTstat), max(df.tvals1$AbsTstat)) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(subset(df.tvals1, Hemi=='l'), aes(x=Factor, y=AbsTstat)) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat="identity", position=position_dodge(), colour="black", aes(fill=Factor)) + 
+  geom_hline(yintercept = 1.96, linetype='dashed') +
+  geom_hline(yintercept = -1.96, linetype='dashed') + 
+  facet_wrap(~ROI) + 
+  ylab("Feats > Resid T-statistic") + ylim(min(df.tvals1$AbsTstat), max(df.tvals1$AbsTstat)) + 
+  bar_theme() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+
+```{r}
+## future
+# library(lme4)
+#rdat <- rdats[,6]
+#fit2 <- lmer(rdat ~ faces + quests + shape_trait1 + shape_trait2 + shape_trait3 + shape_trait4 + shape_trait5 + shape_trait6 + resid_trait1 + resid_trait2 + resid_trait3 + resid_trait4 + resid_trait5 + resid_trait6 + roll + pitch + yaw +  dS + dL + dP + (1|subject), data=xmats)
+#summary(fit2)
+```
+
+
