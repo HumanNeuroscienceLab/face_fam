@@ -102,6 +102,7 @@ ENV/
 
 # Rda data files (these can get big)
 .rda
+*.rda
 
 # Example code in package build process
 *-Ex.R
