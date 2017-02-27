@@ -1079,3 +1079,316 @@ get.tvals(ica$S)
 
 mean(abs(get.tvals(ica$S)))
 mean(abs(get.tvals(pca$x[,1:34])))
+
+
+
+
+
+# Add Face Features to Mix ------------------------------------------------
+
+# We see the effect of a model with a larger factor model
+# Features
+indir <- "/data1/famface01/analysis/misc/320_roi_task_activity"
+load(file.path(indir, "20_predict_face_feats.rda"), verbose=T)
+
+# Convolve the fac.preds and fac.resids
+spm.xmats.more <- llply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  vid.timing <- dat$basics$timing
+  vnames <- sort(levels(vid.timing$video))
+  
+  # Faces
+  onsets0 <- vid.timing$onset
+  durs0   <- vid.timing$duration
+  faces   <- convolve.spm.hrf(onsets0, durs0, tot.time, runs, nparams=1)
+  
+  # Questions
+  onsets3 <- vid.timing$onset[vid.timing$question!="none"]
+  durs3   <- 4
+  quests  <- convolve.spm.hrf(onsets3, durs3, tot.time, runs, nparams=1)
+  
+  ## Day of scan
+  #days <- factor(runs)
+  #days <- mapvalues(days, from=1:16, to=rep(1:4,each=4))
+  #days <- model.matrix(~days)[,-1] # matrix of 1s 0s ... no intercept
+  
+  ## Repeat days (on the second and fourth day we repeat the stimuli)
+  #repeat.day <- factor(vid.timing$run)
+  #repeat.day <- mapvalues(repeat.day, from=1:16, to=rep(c(1,2,1,2),each=4))
+  #onsets4    <- vid.timing$onset[repeat.day==2]
+  #durs4      <- vid.timing$duration[repeat.day==2]
+  #repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs)
+  
+  # Motion
+  mc <- load.mc(subj)
+  mc <- scale(mc, center=T, scale=F)
+  #fds <- load.fds(subj)
+  
+  # Traits
+  vnames <- as.character(dat$basics$timing$video)
+  match.inds <- sapply(vnames, function(vname) which(demo.vnames==vname))
+  
+  shape.traits2 <- scale(fac.preds[match.inds,], center=T, scale=F)
+  resid.traits2 <- scale(fac.resids[match.inds,], center=T, scale=F)
+  tmp <- lapply(1:ncol(shape.traits2), function(i) convolve.spm.hrf(onsets0, durs0, tot.time, runs, shape.traits2[,i], nparams = 1))
+  shape.traits3 <- do.call(cbind, tmp)
+  tmp <- lapply(1:ncol(resid.traits2), function(i) convolve.spm.hrf(onsets0, durs0, tot.time, runs, resid.traits2[,i], nparams = 1))
+  resid.traits3 <- do.call(cbind, tmp)
+  
+  ret <- cbind(faces, quests, mc, shape.traits3, resid.traits3)
+  colnames(ret) <- c(rep("faces",1), rep("quests",1), colnames(mc), rep(sprintf("shape%02i", 1:ncol(shape.traits2)),1), rep(sprintf("resids%02i", 1:ncol(resid.traits2)),1))
+  ret
+}, .progress="text")
+spm.xmats.more2 <- do.call(rbind, spm.xmats.more)
+
+
+spm.xmats.feats <- llply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  vid.timing <- dat$basics$timing
+  vnames <- sort(levels(vid.timing$video))
+  
+  # Face Features Times
+  onsets0 <- vid.timing$onset
+  durs0   <- vid.timing$duration
+  
+  # Rearrange
+  vnames <- as.character(dat$basics$timing$video)
+  match.inds <- sapply(vnames, function(vname) which(demo.vnames==vname))
+  face.feats2 <- scale(pca.face.feats[match.inds,], center=T, scale=F)
+  
+  # Convolve
+  tmp <- llply(1:ncol(face.feats2), function(i) convolve.spm.hrf(onsets0, durs0, tot.time, runs, face.feats2[,i], nparams = 1), .parallel=T)
+  face.feats3 <- do.call(cbind, tmp)
+  
+  colnames(face.feats3) <- sprintf("feats%02i", 1:ncol(face.feats3))
+  
+  face.feats3
+}, .progress="text")
+spm.xmats.feats2 <- do.call(rbind, spm.xmats.feats)
+
+sfits <- summary(fits)
+
+# Split up
+faces  <- spm.xmats.more2[,1]
+quests <- spm.xmats.more2[,2]
+mcs    <- spm.xmats.more2[,3:8]
+shapes <- spm.xmats.more2[,9:26]
+shapes1 <- shapes[,c(1:5,9,12)]
+shapes2 <- shapes[,c(6:8,10,13)]
+shapes3 <- shapes[,c(11,14:15)]
+shapes4 <- shapes[,c(16:18)]
+resids <- spm.xmats.more2[,27:44]
+resids1 <- resids[,c(1:5,9,12)]
+resids2 <- resids[,c(6:8,10,13)]
+resids3 <- resids[,c(11,14:15)]
+resids4 <- resids[,c(16:18)]
+face.feats <- spm.xmats.feats2
+
+# Run the anova
+fits <- aov(std.rdats ~ ssubs + faces + quests + mcs + shapes1 + shapes2 + shapes3 + shapes4 + resids1 + resids2 + resids3 + resids4 + face.feats)
+sfits <- summary(fits)
+
+## run with less
+tmp <- prcomp(face.feats, retx=T)
+#tmp2 <- getcomps.iter(face.feats) # this was useless, gave too many
+face.feats2 <- tmp$x[,1:126]
+fits2 <- aov(std.rdats ~ ssubs + faces + quests + mcs + shapes1 + shapes2 + shapes3 + shapes4 + resids1 + resids2 + resids3 + resids4 + face.feats2)
+sfits2 <- summary(fits2)
+
+## run with even less and less
+face.feats3 <- tmp$x[,1:50]
+fits3 <- aov(std.rdats ~ ssubs + faces + quests + mcs + shapes1 + shapes2 + shapes3 + shapes4 + resids1 + resids2 + resids3 + resids4 + face.feats3)
+sfits3 <- summary(fits3)
+
+face.feats4 <- tmp$x[,1:20]
+fits4 <- aov(std.rdats ~ ssubs + faces + quests + mcs + shapes1 + shapes2 + shapes3 + shapes4 + resids1 + resids2 + resids3 + resids4 + face.feats4)
+sfits4 <- summary(fits4)
+
+# Get outputs from one of those anovas
+tstats <- sapply(sfits2, function(sfit) {
+  fstats <- sfit$`F value`
+  tstats <- sqrt(fstats[-length(fstats)])
+  tstats[-c(1:4)]
+})
+colnames(tstats) <- rnames2
+rownames(tstats) <- c("Pred Traits", "Pred Face-Elem", "Pred Race", "Pred Other", "Resid Traits", "Resid Face-Elem", "Resid Race", "Resid Other", "Low-Level Feats")
+
+pvals <- sapply(sfits2, function(sfit) {
+  ps <- sfit$`Pr(>F)`
+  ps <- ps[-length(ps)]
+  ps[-c(1:4)]
+})
+fdr.pvals <- matrix(p.adjust(pvals, "fdr"), nrow(pvals), ncol(pvals))
+colnames(fdr.pvals) <- colnames(tstats)
+rownames(fdr.pvals) <- rownames(tstats)
+fdr.zvals <- qt(fdr.pvals, Inf, lower.tail=F)
+
+library(RColorBrewer)
+col <- brewer.pal(3, "Spectral")
+
+layout(matrix(1:6, 2, 3, byrow = T))
+for (ri in 1:6) {
+  mar <- par()$mar
+  par(mar = c(7, 4, 2, 2) + 0.2)
+  barplot(tstats[,ri], col=rep(col, c(4,4,1)), las=2, ylab="Tstats", 
+          main=sprintf("%s", rnames2[ri]), ylim = c(0,max(tstats)))
+  abline(h=1.65, lty=3)
+  par(mar=mar)
+}
+layout(1)
+
+layout(matrix(c(1:5,0), 2, 3, byrow = T))
+for (ri in 7:11) {
+  mar <- par()$mar
+  par(mar = c(7, 4, 2, 2) + 0.2)
+  barplot(tstats[,ri], col=rep(col, c(4,4,1)), las=2, ylab="Tstats", 
+          main=sprintf("%s", rnames2[ri]), ylim = c(0,max(tstats)))
+  abline(h=1.65, lty=3)
+  par(mar=mar)
+}
+layout(1)
+
+
+# First do with rdats
+fits <- lm(rdats ~ ssubs + . , data=data.frame(spm.xmats.more2))
+sfits <- summary(fits)
+tvals <- sapply(sfits, function(sfit) sfit$coefficients[-c(1:21),3][3:14])
+tvals <- t(tvals)
+rownames(tvals) <- rnames2
+colnames(tvals) <- c(sprintf("shape%02i", 1:6), sprintf("resid%02i", 1:6))
+round(tvals, 3)
+round(tvals*(abs(tvals)>1.96), 2)
+round(tvals*(abs(tvals)>1.96), 2)[,c(7:12,1:6)]
+
+# Then with std.rdats
+fits <- lm(std.rdats ~ ssubs + . , data=data.frame(spm.xmats.more2))
+sfits <- summary(fits)
+
+# Try with std.rdats based on thresholding of data
+## cortex
+locfiles1 <- sprintf("/data1/famface01/analysis/roi/Functional_v3/subjects/%s_zstats_thresh.nii.gz", subjects)
+locs1 <- sapply(locfiles1, read.mask, NULL)
+## amygdala
+locfiles2 <- sprintf("/data1/famface01/analysis/roi/Functional_v3/amygdala/subjects/%s_zstats_thresh.nii.gz", subjects)
+locs2 <- sapply(locfiles2, read.mask, NULL)
+## combine
+locs <- locs1
+locs[locs2!=0] <- locs2[locs2!=0]
+## average
+std.rdats2 <- sapply(1:length(rnames), function(ri) {
+  tmp <- lapply(1:ncol(locs), function(si) {
+    subj <- subjects[si]
+    loc.roi <- locs[rois == ri,si]
+    rowMeans(std.rdats.all[[ri]][ssubs==subj,loc.roi!=0])
+  })
+  unlist(tmp)
+})
+colnames(std.rdats2) <- rnames
+
+fits2 <- lm(std.rdats2 ~ ssubs + . , data=data.frame(spm.xmats.more2))
+sfits2 <- summary(fits2) # gives slightly better fits
+
+
+
+# Change Points -----------------------------------------------------------
+
+library(bcp)
+
+
+## try actual time-series
+plot.ts(cbind(rdats[runs==1,1],smooth.spline(rdats[runs==1,1], cv=F)$y), plot.type='single', col=1:2)
+sm.rdats <- rdats*0
+for (ri in runs) {
+  for (i in 1:ncol(rdats)) {
+    sm.rdats[runs==ri,i] <- smooth.spline(rdats[runs==ri,i])$y
+  }
+}
+plot.ts(sm.rdats[runs==1,1:4])
+tmp <- bcp(sm.rdats[runs==1,])
+tmp2 <- bcp(sm.rdats[runs==1,3])
+plot(tmp)
+plot(tmp2)
+
+tmp2 <- e.agglo(sm.rdats[runs==1,])
+tmp2 <- e.divisive(sm.rdats[runs==1,])
+plot(sm.rdats[runs==1,3], type='l')
+abline(v=tmp2$estimates, lty=3)
+
+
+## move onto moving window timeseries
+
+library(Rfast)
+win <- 30
+win.step <- 1
+isub <- 1
+subj <- subjects[isub]
+irun <- 1
+
+# get a given run
+run.rdats <- std.rdats[ssubs==subj,][runs==irun,]
+
+# pad your time-series
+pad.run.rdats <- matrix(0, nrow(run.rdats)+win, ncol(run.rdats))
+pad.run.rdats[(win/2+1):(nrow(run.rdats)+win/2),] <- run.rdats
+
+# now do a moving window correlation
+istarts <- seq(1, nrow(run.rdats), win.step)
+wincors <- t(sapply(istarts, function(istart) {
+  iend   <- istart + win - 1
+  tswin <- pad.run.rdats[istart:iend,]
+  cmatwin <- cora(tswin)
+  cmatwin[lower.tri(cmatwin)]
+}))
+
+bret <- bcp(wincors)
+plot(bret)
+
+
+plot.ts(wincors[,1:10], plot.type="single", col=1:10)
+winpca <- prcomp(wincors, retx=T)
+plot.ts(winpca$x[,1:10], plot.type="single", col=1:10)
+
+tt <- getcomps.iter(scale(wincors, scale=F))
+plot.ts(tt$u, col=1:(tt$k))
+
+evals <- eigen(cor(wincors), only.values = T)
+nFactors::nScree(x=evals$values)
+
+library(ecp)
+tmpx1 <- e.agglo(wincors) # this is pretty decent
+tmpx2 <- e.divisive(wincors)
+tmpx3 <- e.cp3o(wincors) # always less
+
+# THIS works best it seems x1 or x2
+plot.ts(run.rdats[,3])
+abline(v=tmpx2$estimates, lty=2)
+
+tmpx1b <- e.agglo(winpca$x[,1:5])
+tmpx1c <- e.agglo(winpca$x[,1:8])
+
+plot(bcp(winpca$x[,1:5]))
+plot(bcp(winpca$x[,1:8]))
+
+plot(bcp(winpca$x[,4]))
+
+
+library(ClusterR)
+opt <- Optimal_Clusters_KMeans(wincors, 15, seed=42, threads=20, criterion = "distortion_fK", initializer = "kmeans++",  fK_threshold = 0.85)
+km_rc = KMeans_rcpp(wincors, clusters = 5, num_init = 20, max_iters = 200, initializer = 'kmeans++', threads = 20, verbose = F)
+
+library(dynamicTreeCut)
+d <- dist(t(wincors))
+dmat <- as.matrix(d)
+hc <- hclust(d, method="ward.D2")
+cl <- cutreeDynamic(hc, distM=dmat)
+table(cl)
+clmeans <- sapply(sort(unique(cl)), function(i) rowMeans(wincors[,cl==i]))
+plot.ts(clmeans)

@@ -447,7 +447,7 @@ table(sign(colMeans(sapply(1:11, function(i) rowMeans(sub.bs1[,,i,2] - sub.bs2[,
 # Get group average
 grp.bs1 <- apply(sub.bs1, 2:4, mean)
 grp.bs2 <- apply(sub.bs2, 2:4, mean)
-grp.bs3 <- apply(sub.bs3, 2:4, mean)
+grp.bs3 <- apply(sub.bs3a, 2:4, mean)
 
 # Prep the factors to regress
 vnames <- dimnames(sub.bs2)$vid
@@ -487,6 +487,9 @@ table(sign(sapply(sfit1b, function(x) x$adj.r.squared) - sapply(sfit1t, function
 round(sapply(sfit1t, function(x) x$adj.r.squared), 3)
 
 
+# correlate between participants
+cor(t(sub.bs1[,,3,2]))
+
 # okay so now with the tvals try to do an aov to compare models
 bs.tvals <- grp.bs1[,,2]
 fit <- aov(bs.tvals ~ fac.preds2 + fac.resids2 + pca.feats2)
@@ -506,93 +509,91 @@ for (i in 1:6) {
 
 # Classify ----------------------------------------------------------------
 
-library(glmnet)
+source("/data1/famface01/command/misc/face_representations/misc/cv_glmnet.R")
 
-get_bestfit <- function(cvfit, type.measure, exclude.zero=FALSE) {
-  bestouts <- cvfit$measures[[type.measure]]
-  extreme  <- ifelse(type.measure == "rmse", min, max)
-  
-  if (exclude.zero) {
-    val <- extreme(bestouts[cvfit$nzero>0])
-  } else {
-    val <- extreme(bestouts)
-  }
-  
-  ind <- which(bestouts == val)
-  
-  bestfit  <- list(
-    measure = type.measure, 
-    val     = val, 
-    ind     = ind, 
-    lam     = cvfit$lambda[ind], 
-    preval  = cvfit$fit.preval[,ind], 
-    nzero   = cvfit$nzero[ind], 
-    coef    = coef(cvfit, s=cvfit$lambda[ind])
-  )
-  bestfit
-}
+rnames2 <- sub("[.]", " ", rnames)
+rnames2 <- sub("^r", "R", rnames2)
+rnames2 <- sub("^l", "L", rnames2)
 
-run_cvglmnet <- function(X, y, keep=T, parallel=T, type.measure="rsq", exclude.zero=FALSE, ...) 
-{
-  if (!(type.measure %in% c("rsq", "r", "rmse"))) stop("unknown type.measure: ", type.measure)
-  
-  rmse <- function(x1, x2) sqrt(mean((x1-x2)^2))
-  
-  #cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel)
-  cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel, ...)
-  
-  rs     <- sapply(1:length(cvfit$lambda), function(i) cor(cvfit$fit.preval[,i], y))
-  rsqs   <- rs^2
-  rmses  <- sapply(1:length(cvfit$lambda), function(i) rmse(cvfit$fit.preval[,i], y))
-  cvfit$measures <- list(
-    r = rs, 
-    rsq = rsqs, 
-    rmse = rmses
-  )
-  
-  cvfit$bestfit <- get_bestfit(cvfit, type.measure, exclude.zero)
-  
-  return(cvfit)
-}
-
-i <- 1
 bs.tvals <- grp.bs1[,,2]
-for (i in 1:6) {
-  bs.tvals <- sub.bs2[i,,,2]
-  cvfit1 <- run_cvglmnet(fac.preds2, bs.tvals[,3])
-  print(cvfit1$bestfit$val)
-}
 
-for (i in 1:6) {
-  bs.tvals <- sub.bs1[i,,,2]
-  cvfit1 <- run_cvglmnet(fac.preds2, bs.tvals[,3])
-  print(cvfit1$bestfit$val)
-}
+library(cvTools)
+cfolds <- cvFolds(nrow(bs.tvals), K=10, R=10)
 
-# oh wait this btw subj works!
-tmp <- unlist(lapply(1:6, function(i) sub.bs1[i,,3,2]))
-subs <- rep(1:6, each=864)
-cvfit1 <- run_cvglmnet(fac.preds2[rep(1:nrow(fac.preds2),6),], tmp, foldid=subs)
-cvfit1$bestfit$val
+roi.cvfits <- llply(1:ncol(bs.tvals), function(ri) {
+  cvfit1 <- run_repeated_cvglmnet(cbind(fac.preds2, fac.resids2, pca.feats2), bs.tvals[,ri], cfolds=cfolds, parallel=T)
+  cvfit2 <- run_repeated_cvglmnet(cbind(fac.resids2, pca.feats2), bs.tvals[,ri], cfolds=cfolds, parallel=T)
+  cvfit3 <- run_repeated_cvglmnet(cbind(fac.preds2, pca.feats2), bs.tvals[,ri], cfolds=cfolds, parallel=T)
+  cvfit4 <- run_repeated_cvglmnet(cbind(fac.preds2, fac.resids2), bs.tvals[,ri], cfolds=cfolds,  parallel=T)
+  cvfit5 <- run_repeated_cvglmnet(fac.preds2, bs.tvals[,ri], cfolds=cfolds, parallel=T)
+  cvfit6 <- run_repeated_cvglmnet(fac.resids2, bs.tvals[,ri], cfolds=cfolds, parallel=T)
+  cvfit7 <- run_repeated_cvglmnet(pca.feats2, bs.tvals[,ri], cfolds=cfolds, parallel=T)
+  
+  cvfits <- list(cvfit1, cvfit2, cvfit3, cvfit4, cvfit5, cvfit6, cvfit7)
+  
+  return(cvfits)
+}, .progress="text")
+names(roi.cvfits) <- rnames
+# collect all the r^2
+all.r2s <- sapply(roi.cvfits, function(cvfits) sapply(cvfits, function(x) x$mean.max.r2s))
+rownames(all.r2s) <- c("Pred+Resid+Low", "Resid+Low", "Pred+Low", "Pred+Resid", 
+                       "Pred", "Resid", "Low")
+colnames(all.r2s) <- rnames2
 
-cvfit2 <- run_cvglmnet(fac.resids2[rep(1:nrow(fac.resids2),6),], tmp, foldid=subs)
-cvfit2$bestfit$val
+library(ggplot2)
+df <- reshape2::melt(all.r2s)
+colnames(df) <- c("Model", "ROI", "r2")
+ldf <- subset(df, grepl("^L", ROI))
+rdf <- subset(df, grepl("^R", ROI))
+# RIGHT
+ggplot(rdf, aes(x=Model, y=r2, fill=Model)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  ylab("R-squared") + 
+  facet_wrap(~ROI) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=12))
+# LEFT
+ggplot(ldf, aes(x=Model, y=r2, fill=Model)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  ylab("R-squared") + 
+  facet_wrap(~ROI) + 
+  theme(axis.text.x = element_text(size=12, angle = 90, hjust = 1))
 
-cvfit3 <- run_cvglmnet(pca.feats2[rep(1:nrow(pca.feats2),6),], tmp, foldid=subs)
-cvfit3$bestfit$val
 
-X <- cbind(fac.preds2, fac.resids2, pca.feats2)[rep(1:nrow(pca.feats2),6),]
-cvfit <- run_cvglmnet(X, tmp, foldid=subs)
-cvfit$bestfit$val
+trait.inds <- c(1:5,9,12)
+element.inds <- c(6:8,10,13)
+race.inds <- c(11,14:15)
+misc.inds <- c(16:18)
+list.inds <- list(trait.inds, element.inds, race.inds, misc.inds)
 
-X <- cbind(fac.resids2, pca.feats2)[rep(1:nrow(pca.feats2),6),]
-cvfit <- run_cvglmnet(X, tmp, foldid=subs)
-cvfit$bestfit$val
+# Do later analysis where take susbsets of the preds and what not
+roi.cvfits2 <- llply(1:ncol(bs.tvals), function(ri) {
+  llply(list.inds, function(inds) {
+    run_repeated_cvglmnet(cbind(fac.preds2[,inds], fac.resids2[,inds]), bs.tvals[,ri], cfolds=cfolds, parallel=T)
+  }, .parallel=F)
+}, .progress="text")
+names(roi.cvfits2) <- rnames
+# collect all the r^2
+all.r2s2 <- sapply(roi.cvfits2, function(cvfits) sapply(cvfits, function(x) x$mean.max.r2s))
+rownames(all.r2s2) <- c("Trait", "Element", "Race", "Misc")
+colnames(all.r2s2) <- rnames2
+all.r2s2 <- rbind(all.r2s2, all.r2s[4,])
+rownames(all.r2s2) <- c("Trait", "Element", "Race", "Misc", "All")
 
-X <- cbind(fac.preds2, pca.feats2)[rep(1:nrow(pca.feats2),6),]
-cvfit <- run_cvglmnet(X, tmp, foldid=subs)
-cvfit$bestfit$val
+df <- reshape2::melt(all.r2s2)
+colnames(df) <- c("Model", "ROI", "r2")
+ldf <- subset(df, grepl("^L", ROI))
+rdf <- subset(df, grepl("^R", ROI))
+# RIGHT
+ggplot(rdf, aes(x=Model, y=r2, fill=Model)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  ylab("R-squared") + 
+  facet_wrap(~ROI) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=12))
+# LEFT
+ggplot(ldf, aes(x=Model, y=r2, fill=Model)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  ylab("R-squared") + 
+  facet_wrap(~ROI) + 
+  theme(axis.text.x = element_text(size=12, angle = 90, hjust = 1))
 
-X <- cbind(fac.preds2, fac.resids2)[rep(1:nrow(pca.feats2),6),]
-cvfit <- run_cvglmnet(X, tmp, foldid=subs, alpha=0)
-cvfit$bestfit$val
+
