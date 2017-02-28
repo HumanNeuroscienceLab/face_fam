@@ -1,5 +1,9 @@
 
 
+# This script puts together the 18 or so factor scores collapsing the trait, 
+# demographic and physical information. It then uses the PCA face features to 
+# predict each of those factor scores
+
 
 # Setup -------------------------------------------------------------------
 
@@ -19,7 +23,7 @@ source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
 library(glmnet)
 
 
-# Load Data ---------------------------------------------------------------
+# Load Trait Data -----------------------------------------------------------
 
 # Load demographics information
 base <- "/data1/famface01/analysis/encoding/12_Features"
@@ -49,6 +53,7 @@ formula_to_mat <- function(formula, data) {
   X <- model.matrix(attr(mf, "terms"), data=mf)
   return(X)
 }
+
 compile.demo.trait <- function(df.demos, df.traits, ret.intercept=TRUE) {
   ## DEMOGRAPHICS
   # Remove the effect of gender from makeup
@@ -79,7 +84,10 @@ compile.demo.trait <- function(df.demos, df.traits, ret.intercept=TRUE) {
 # Compile the demographics and traits
 mat.all <- compile.demo.trait(df.demos, df.traits)
 
-# Finally load in the shape/texture data
+
+# Load Shape/Texture Data ---------------------------------------------------
+
+# Finally load in the shape/texture data (this is )
 basedir <- "/data1/famface01/analysis/encoding/12_Features/identity_pca"
 sym.shapes <- read.csv(file.path(basedir, "shape_sym_pca_scores.csv"), row.names = 1)
 shape.vnames <- rownames(sym.shapes) # vnames to use
@@ -93,26 +101,42 @@ colnames(X2) <- sprintf("texture_%s", colnames(X2))
 X <- cbind(X1,X2)
 
 
+# Rearrange rows for shape/texture ------------------------------------------
 
-# Reduce Dimensionality -----------------------------------------------------
+# rearrange of the shapes here
+## get the new inds
+inds <- sapply(vnames, function(vname) which(shape.vnames==vname))
+all.equal(shape.vnames[inds], vnames)
+## set new inds
+X0 <- X # save
+X <- as.matrix(X[inds,])
+
+
+# OLD: Reduce Dimensionality -----------------------------------------------------
+
+### I did this before but skip to next section for where I'm at now
+
+# So from this analysis, it seems that maybe should split up traits from other things
 
 # Use factor analysis on demographic/traits
 library(psych)
 
 # remove intercept
 mat.all2 <- mat.all[,-1]
+#mat.all2 <- mat.all2[,c(1,9,15,16:25)]
 head(mat.all2)
 
 # Determine the number of components needed
 fa.parallel(mat.all2) # suggests 9 comps
 vss(mat.all2, 25) # suggests 18 or 21 (going with 21)
 # also went with 21 over 18 because it includes middle eastern participants
+# also there are local minima at 16 and 11
 
 # Get the factors
 fac.res <- psych::fa(mat.all2, nfactors=18, residuals=T, rotate='varimax', 
                      fm='minres')
-loadings(fac.res)
-residuals(fac.res)
+#loadings(fac.res)
+#residuals(fac.res)
 
 # Save the loadings and scores, rename the columns
 fac.loads  <- unclass(fac.res$loadings)
@@ -132,71 +156,69 @@ col <- rev(colorRampPalette(c("#67001F", "#B2182B", "#D6604D",
 corrplot(loading, tl.col='black', tl.cex=.75, diag=T, col=col, is.corr=T)
 
 
+# Select Trait Factors ----------------------------------------------------
 
-# Rearrange rows -----------------------------------------------------
+mat.all2 <- mat.all[,-1]
+#mat.all2 <- mat.all2[,c(1,9,16:25)]
+mat.all2 <- mat.all2[,c(16:25)]
+head(mat.all2)
 
-# rearrange of the shapes here
-## get the new inds
-inds <- sapply(vnames, function(vname) which(shape.vnames==vname))
-all.equal(shape.vnames[inds], vnames)
-## set new inds
-X0 <- X # save
-X <- as.matrix(X[inds,])
+# Determine the number of components needed
+fa.parallel(mat.all2) # suggests 5 factors
+vss(mat.all2, ncol(mat.all2)) # also suggests 5, 6, 7 or 9 factors
+
+# Get the factors (VSS complexity 2 maximizes at 6)
+fac.res <- psych::fa(mat.all2, nfactors=6, residuals=T, rotate='varimax', 
+                     fm='minres')
+
+# Save the loadings and scores, rename the columns
+fac.loads  <- unclass(fac.res$loadings)
+fac.scores <- fac.res$scores
+colnames(fac.loads) <- sprintf("factor%02i", 1:ncol(fac.loads))
+colnames(fac.scores) <- sprintf("factor%02i", 1:ncol(fac.scores))
+
+# Plot
+library(corrplot)
+hc1     <- hclust(dist(fac.loads))
+hc1     <- as.dendrogram(hc1)
+ord.hc1 <- order.dendrogram(hc1)
+loading <- fac.loads[ord.hc1,]
+col <- rev(colorRampPalette(c("#67001F", "#B2182B", "#D6604D", 
+                              "#F4A582", "#FDDBC7", "#FFFFFF", "#D1E5F0", "#92C5DE", 
+                              "#4393C3", "#2166AC", "#053061"))(200))
+corrplot(loading, tl.col='black', tl.cex=.75, diag=T, col=col, is.corr=T)
+
+# Assign Names
+fac.names <- c("unemotional", "competent", "trustworthy", "typical", 
+               "memorable", "attractive")
+colnames(fac.scores) <- fac.names
+
+
+# Other Features ----------------------------------------------------------
+
+mat.all3 <- mat.all[,-1]
+mat.all3 <- mat.all3[,-c(16:25)]
+
+# split up
+facial.hair <- mat.all3[,c(2:7)]
+race <- mat.all3[,10:14]
+misc <- mat.all3[,c(1,8,9,15)]
+
+# Combine it all back
+all.mat <- cbind(fac.scores, misc, facial.hair, race)
+all.groups <- rep(c("traits", "age", "makeup", "gender", "glasses", "facial_hair", "race"), c(ncol(fac.scores), 1, 1, 1, 1, ncol(facial.hair), ncol(race)))
 
 
 
 # Classification Functions --------------------------------------------
 
-get_bestfit <- function(cvfit, type.measure, exclude.zero=FALSE) {
-  bestouts <- cvfit$measures[[type.measure]]
-  extreme  <- ifelse(type.measure == "rmse", min, max)
-  
-  if (exclude.zero) {
-    val <- extreme(bestouts[cvfit$nzero>0])
-  } else {
-    val <- extreme(bestouts)
-  }
-  
-  ind <- which(bestouts == val)
-  
-  bestfit  <- list(
-    measure = type.measure, 
-    val     = val, 
-    ind     = ind, 
-    lam     = cvfit$lambda[ind], 
-    preval  = cvfit$fit.preval[,ind], 
-    nzero   = cvfit$nzero[ind], 
-    coef    = coef(cvfit, s=cvfit$lambda[ind])
-  )
-  bestfit
-}
-
-run_cvglmnet <- function(X, y, foldid=NULL, keep=T, parallel=T, type.measure="rsq", exclude.zero=FALSE, ...) 
-{
-  if (!(type.measure %in% c("rsq", "r", "rmse"))) stop("unknown type.measure: ", type.measure)
-  
-  rmse <- function(x1, x2) sqrt(mean((x1-x2)^2))
-  
-  #cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel)
-  cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel, foldid=foldid, ...)
-  
-  rs     <- sapply(1:length(cvfit$lambda), function(i) cor(cvfit$fit.preval[,i], y))
-  rsqs   <- rs^2
-  rmses  <- sapply(1:length(cvfit$lambda), function(i) rmse(cvfit$fit.preval[,i], y))
-  cvfit$measures <- list(
-    r = rs, 
-    rsq = rsqs, 
-    rmse = rmses
-  )
-  
-  cvfit$bestfit <- get_bestfit(cvfit, type.measure, exclude.zero)
-  
-  return(cvfit)
-}
-
+source("/data1/famface01/command/misc/face_representations/misc/cv_glmnet.R")
 
 
 # Classification ----------------------------------------------------------
+
+
+
 
 # Predict the scores
 # for each score, we repeat the process 10 times
