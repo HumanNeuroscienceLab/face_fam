@@ -24,81 +24,16 @@ library(gplots)
 
 # Functions ---------------------------------------------------------------
 
-get_bestfit <- function(cvfit, type.measure) {
-  bestouts <- cvfit$measures[[type.measure]]
-  extreme  <- ifelse(type.measure == "rmse", min, max)
-  which.extreme <- ifelse(type.measure == "rmse", which.min, which.max)
-  
-  val <- extreme(bestouts)
-  ind <- which.extreme(bestouts)
-  
-  bestfit  <- list(
-    measure = type.measure, 
-    val     = val, 
-    ind     = ind, 
-    lam     = cvfit$lambda[ind], 
-    preval  = cvfit$fit.preval[,ind], 
-    nzero   = cvfit$nzero[ind], 
-    coef    = coef(cvfit, s=cvfit$lambda[ind])
-  )
-  bestfit
-}
-
-run_cvglmnet <- function(X, y, keep=T, parallel=T, type.measure="rsq", ...) 
-{
-  if (!(type.measure %in% c("rsq", "r", "rmse"))) stop("unknown type.measure: ", type.measure)
-  
-  rmse <- function(x1, x2) sqrt(mean((x1-x2)^2))
-  
-  #cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel)
-  cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel, ...)
-  
-  rs     <- sapply(1:length(cvfit$lambda), function(i) cor(cvfit$fit.preval[,i], y))
-  rsqs   <- rs^2
-  rmses  <- sapply(1:length(cvfit$lambda), function(i) rmse(cvfit$fit.preval[,i], y))
-  cvfit$measures <- list(
-    r = rs, 
-    rsq = rsqs, 
-    rmse = rmses
-  )
-  
-  cvfit$bestfit <- get_bestfit(cvfit, type.measure)
-  
-  return(cvfit)
-}
-
-# TODO
-run_cvglmnet.binomial <- function(X, y, keep=T, parallel=T, type.measure="accuracy", ...) 
-{
-  if (!(type.measure %in% c("accuracy"))) stop("unknown type.measure: ", type.measure)
-  
-  cvfit  <- cv.glmnet(X, y, keep=keep, parallel=parallel, ...)
-  
-  accuracies <- sapply(1:length(cvfit$lambda), function(i) cor(cvfit$fit.preval[,i], y))
-  
-  rs     <- sapply(1:length(cvfit$lambda), function(i) cor(cvfit$fit.preval[,i], y))
-  rsqs   <- rs^2
-  rmses  <- sapply(1:length(cvfit$lambda), function(i) rmse(cvfit$fit.preval[,i], y))
-  cvfit$measures <- list(
-    r = rs, 
-    rsq = rsqs, 
-    rmse = rmses
-  )
-  
-  cvfit$bestfit <- get_bestfit(cvfit, type.measure)
-  
-  return(cvfit)
-}
-
-run_caret_glmnet <- function(X, y, nfolds=10, nrepeats=2, nlambda=25, alpha=1, 
-                             metric="Rsquared", family="gaussian")
+run_caret_glmnet <- function(X, y, nfolds=10, nrepeats=10, nlambda=100, alpha=1, 
+                             metric="Rsquared", family="gaussian", ...)
 {
   fitControl <- trainControl(
     method = "repeatedcv",
     number = nfolds, 
     repeats = nrepeats, 
     allowParallel = TRUE, 
-    savePredictions = "final"
+    savePredictions = "final", 
+    classProbs = TRUE
   )
   
   # Tuning Grids
@@ -177,7 +112,7 @@ head(tmp)
 
 # Factor Analysis ---------------------------------------------------------
 
-trait.fa <- factanal(df.traits, factors = 6, rotation = "varimax", 
+trait.fa <- factanal(df.traits, factors = 5, rotation = "varimax", 
                      na.action = na.omit, scores="regression")
 
 # Reorder the rows of the rotation matrix for nicer viewing
@@ -192,6 +127,30 @@ col <- rev(colorRampPalette(c("#67001F", "#B2182B", "#D6604D",
                               "#4393C3", "#2166AC", "#053061"))(200))
 corrplot(loading, tl.col='black', tl.cex=.75, diag=T, col=col, is.corr=T)
 
+
+# Test Out -----------------------------------------------------------------
+
+in.df <- cbind(subset(df.demos, select=c("age", "makeup", "gender", "glasses")), df.traits)
+in.df$gender <- as.numeric(in.df$gender) - 1
+in.df$glasses <- as.numeric(in.df$glasses) - 1
+
+psych::fa.parallel(in.df) # suggests 6 comps
+psych::vss(in.df, ncol(in.df)) # suggests 6-9 comps
+
+trait.fa <- factanal(in.df, factors = 9, rotation = "varimax", 
+                     na.action = na.omit, scores="regression")
+
+# Reorder the rows of the rotation matrix for nicer viewing
+hc1     <- hclust(dist(trait.fa$loadings))
+hc1     <- as.dendrogram(hc1)
+ord.hc1 <- order.dendrogram(hc1)
+loading <- trait.fa$loadings[ord.hc1,]
+round(loading, 3)
+library(corrplot)
+col <- rev(colorRampPalette(c("#67001F", "#B2182B", "#D6604D", 
+                              "#F4A582", "#FDDBC7", "#FFFFFF", "#D1E5F0", "#92C5DE", 
+                              "#4393C3", "#2166AC", "#053061"))(200))
+corrplot(loading, tl.col='black', tl.cex=.75, diag=T, col=col, is.corr=T)
 
 
 
@@ -236,14 +195,16 @@ tmp <- out$v %*% MASS::ginv(t(out$v))
 head(tmp[,1:5])
 head(scale(sym.combined, scale=F)[,1:5])
 
+
 # Classify Shapes/Texture ---------------------------------------------------
 
 # We use both to allow for rendering the full face
 
-# Setup
 fits <- list()
+
+# Setup
 X1 <- as.matrix(sym.textures)[,1:200] # the first 200 comps is enough i think
-X2 <- as.matrix(sym.shapes) # might not really need all the shapes
+X2 <- as.matrix(sym.shapes)[,1:65] # might not really need all the shapes
 colnames(X2) <- sprintf("shape_%s", colnames(X2))
 colnames(X1) <- sprintf("texture_%s", colnames(X1))
 X  <- cbind(X2, X1)
@@ -251,10 +212,13 @@ X  <- cbind(X2, X1)
 inds.shape   <- 1:ncol(X2)
 inds.texture <- (1:ncol(X))[-inds.shape]
 
-# Gender
-y <- factor(df.demos$gender)
-fit <- run_caret_glmnet(X, y, nfolds=10, nrepeats=5, nlambda=100, alpha=1, 
-                        metric="Accuracy", family="binomial")
+###
+# Binomial
+###
+
+# Glasses
+y <- factor(df.demos$glasses)
+fit <- run_caret_glmnet(X, y, alpha=1, metric="Kappa", family="binomial")
 ## get accuracy
 confmat <- confusionMatrix(fit$pred$pred, fit$pred$obs)
 confmat$overall[1]
@@ -263,65 +227,233 @@ tmp <- coef(fit$finalModel, s=fit$bestTune$lambda)
 tmp <- tmp[-1] # this will be used to weight the face in
 tmp2<- varImp(fit)
 ## save
+fits$glasses <- fit
+
+# Gender
+y <- factor(df.demos$gender)
+fit <- run_caret_glmnet(X, y, alpha=1, metric="Accuracy", family="binomial")
+## get accuracy
+confmat <- confusionMatrix(fit$pred$pred, fit$pred$obs)
+confmat$overall[1]
+## get coefficients
+tmp <- coef(fit$finalModel, s=fit$bestTune$lambda)
+tmp <- tmp[-1] # this will be used to weight the face in
+tmp2<- varImp(fit)
+head(tmp2)
+## save
 fits$gender <- fit
+
+###
+# Continuous
+###
 
 # Age
 y <- as.numeric(df.demos$age) # cuz this is group average
-fit <- run_caret_glmnet(X, y, nfolds=10, nrepeats=5, nlambda=100, alpha=1, 
-                        metric="Rsquared", family="gaussian")
+fit <- run_caret_glmnet(X, y, alpha=1, metric="Rsquared", family="gaussian")
 fit$results[rownames(fit$bestTune),]
 #tmp <- fit$pred[grep("Rep1", fit$pred$Resample),]
 #plot.ts(tmp[,c("pred","obs")], plot.type = "single", col=2:3)
 ## save
 fits$age <- fit
 
-# Attractiveness
-y <- as.numeric(df.traits$attractive)
-fit <- run_caret_glmnet(X, y, nfolds=10, nrepeats=5, nlambda=100, alpha=1, 
-                        metric="Rsquared", family="gaussian")
+# Makeup
+y <- as.numeric(df.demos$makeup)
+fit <- run_caret_glmnet(X, y, alpha=1, metric="Rsquared", family="gaussian")
 fit$results[rownames(fit$bestTune),]
 #tmp <- fit$pred[grep("Rep1", fit$pred$Resample),]
 #plot.ts(tmp[,c("pred","obs")], plot.type = "single", col=2:3)
 ## save
-fits$attractive <- fit
+fits$makeup <- fit
 
 # Factor Scores (6 of them)
 fitsFA <- llply(1:ncol(trait.fa$scores), function(i) {
   y <- as.numeric(trait.fa$scores[,i])
-  fit <- run_caret_glmnet(X, y, nfolds=10, nrepeats=5, nlambda=100, alpha=1, 
-                          metric="Rsquared", family="gaussian")
+  fit <- run_caret_glmnet(X, y, alpha=1, metric="Rsquared", family="gaussian")
   fit
 }, .progress="text")
 ret <- ldply(1:length(fitsFA), function(i) {
-  fit <- fits[[i]]
+  fit <- fitsFA[[i]]
   data.frame(factor=sprintf("factor %i", i), fit$results[rownames(fit$bestTune),])
 })
 ret # not all traits have a great fit
 
-fits$trait_factors <- fitsFA
+for (i in 1:length(fitsFA)) {
+  fits[[sprintf("trait%02i", i)]] <- fitsFA[[i]]
+}
 
 # Save
-save(fits, file="/data1/famface01/command/misc/face_representations/120_features/tmp_combined_fits.rda")
+save(fits, file="/data1/famface01/command/misc/face_representations/120_features/tmp_combined_fits_try2.rda")
+
+
+
+
+# Predicted/Residual Values -----------------------------------------------
+
+###
+# Continuous
+###
+
+cnames <- c("age", "makeup", 
+            "trait01", "trait02", "trait03", "trait04", "trait05")
+df.pred1 <- llply(cnames, function(cname) {
+  cat("\n", cname, "\n")
+  
+  fit <- fits[[cname]]
+  
+  perf  <- getTrainPerf(fit)
+  tune  <- fit$bestTune
+  print(cbind(tune, perf))
+  
+  pmat <- fit$pred
+  
+  # we will need to average by the repititions
+  reps    <- as.numeric(sub("Fold[0-9]{2}[.]Rep", "", pmat$Resample))
+  ureps   <- sort(unique(reps))
+  
+  # order by row indices
+  rowInds <- pmat$rowIndex
+  
+  # Get the predictions and average across reps
+  preds   <- pmat$pred[order(reps, rowInds)]
+  #reps    <- reps[order(reps, rowInds)]
+  preds   <- rowMeans(sapply(ureps, function(ri) preds[sort(reps)==ri]))
+  
+  # Get the observed values and average across reps
+  obs     <- pmat$obs[order(reps, rowInds)]
+  if (!all(obs[sort(reps)==1] == obs[sort(reps)==2])) stop("whoops 1")
+  if (!all(obs[sort(reps)==1] == fit$trainingData$.outcome)) stop("whoops 2")
+  obs     <- rowMeans(sapply(ureps, function(ri) obs[sort(reps)==ri]))
+  if (!all(obs == fit$trainingData$.outcome)) stop("whoops 3")
+  
+  # Get the residuals of the obs
+  resid   <- lm(obs ~ preds)$residuals
+  
+  # Compile
+  ret <- cbind(raw=obs, pred=preds, resid=resid)
+  colnames(ret) <- paste(cname, colnames(ret), sep="_")
+  
+  as.matrix(ret)
+})
+
+
+###
+# Binomial
+###
+
+cnames <- c("glasses", "gender")
+df.pred2 <- llply(cnames, function(cname) {
+  cat("\n", cname, "\n")
+  
+  fit <- fits[[cname]]
+  
+  perf  <- getTrainPerf(fit)
+  tune  <- fit$bestTune
+  print(cbind(tune, perf))
+  
+  pmat <- fit$pred
+  
+  # we will need to average by the repititions
+  reps    <- as.numeric(sub("Fold[0-9]{2}[.]Rep", "", pmat$Resample))
+  ureps   <- sort(unique(reps))
+  
+  # order by row indices
+  rowInds <- pmat$rowIndex
+  
+  ## Binomial
+  # Get the predictions and average across reps
+  predsResamp <- pmat$pred[order(reps, rowInds)]
+  predsResamp <- sapply(ureps, function(ri) predsResamp[sort(reps)==ri])
+  preds <- apply(predsResamp, 1, function(x) names(which.max(table(x))))
+  # Get the observed values and average across reps
+  obsResamp   <- pmat$obs[order(reps, rowInds)]
+  obsResamp   <- sapply(ureps, function(ri) obsResamp[sort(reps)==ri])
+  obs         <- apply(obsResamp, 1, function(x) names(which.max(table(x))))
+  if (!all(obs == fit$trainingData$.outcome)) stop("whoops")
+  
+  ## Probabilities
+  levs <- levels(fit$trainingData$.outcome)
+  probsResamp <- pmat[order(reps, rowInds),levs]
+  probsResamp <- laply(ureps, function(ri) as.matrix(probsResamp[sort(reps)==ri,]))
+  probs       <- apply(probsResamp, 2:3, mean)
+  
+  # Get the residuals of the obs
+  y <- as.numeric(factor(obs)) - 1
+  resid.binom <- glm(y ~ preds, family=binomial(link='logit'))$residuals
+  resid.prob  <- glm(y ~ probs[,1], family=binomial(link='logit'))$residuals
+  
+  # Compile (1 = Male)
+  ret <- cbind(raw=as.numeric(factor(obs)) - 1, pred=as.numeric(factor(preds)) - 1, resid=resid.binom, 
+               probs=probs[,1], residprobs=resid.prob)
+  colnames(ret) <- paste(cname, colnames(ret), sep="_")
+  
+  as.matrix(ret)
+})
+
+###
+# Combine and Save
+###
+
+df.preds <- c(df.pred1, df.pred2)
+df.preds <- do.call(cbind, df.preds)
+rownames(df.preds) <- shape.vnames
+head(df.preds)
+
+basedir <- "/data1/famface01/command/misc/face_representations/120_features"
+write.csv(df.preds, file=file.path(basedir, "demo+traits_raw+pred+resids.csv"))
+
+
 
 
 # Extract Coefs ------------------------------------------------------------
 
 # the -1 removes the intercept (all 1s)
+cfs.glasses <- coef(fits$glasses$finalModel, s=fits$glasses$bestTune$lambda)[-1]
 cfs.gender <- coef(fits$gender$finalModel, s=fits$gender$bestTune$lambda)[-1]
 cfs.age    <- coef(fits$age$finalModel, s=fits$age$bestTune$lambda)[-1]
-cfs.attractive <- coef(fits$attractive$finalModel, s=fits$attractive$bestTune$lambda)[-1]
+cfs.makeup <- coef(fits$makeup$finalModel, s=fits$makeup$bestTune$lambda)[-1]
+cfs.traits <- sapply(fitsFA, function(x) coef(x$finalModel, s=x$bestTune$lambda)[-1])
+colnames(cfs.traits) <- sprintf("trait.factor%02i", 1:length(fitsFA))
 
 # combine
-cfs <- cbind(cfs.gender, cfs.age, cfs.attractive)
+cfs <- cbind(cfs.glasses, cfs.gender, cfs.age, cfs.makeup, cfs.traits)
 cfs.shape   <- cfs[inds.shape,]
 cfs.texture <- cfs[inds.texture,]
 head(cfs.texture)
 
 # save
-basedir <- "/data1/famface01/analysis/encoding/12_Features/identity_pca"
-write.table(cfs.shape, file=file.path(basedir, "coefs_age+gender+attractive_shape.txt"))
-write.table(cfs.texture, file=file.path(basedir, "coefs_age+gender+attractive_texture.txt"))
+basedir <- "/data1/famface01/command/misc/face_representations/120_features"
+write.table(cfs.shape, file=file.path(basedir, "coefs_shape.txt"))
+write.table(cfs.texture, file=file.path(basedir, "coefs_texture.txt"))
 
+
+
+# Visaulize ---------------------------------------------------------------
+
+
+cnames <- c("glasses", "gender")
+binom.measures <- ldply(cnames, function(cname) {
+  fit <- fits[[cname]]
+  perf  <- getTrainPerf(fit)
+  tune  <- fit$bestTune
+  cbind(measure=cname, tune, perf)
+})
+
+cnames <- c("age", "makeup", "trait01", "trait02", "trait03", "trait04", "trait05")
+cont.measures <- ldply(cnames, function(cname) {
+  fit <- fits[[cname]]
+  perf  <- getTrainPerf(fit)
+  tune  <- fit$bestTune
+  cbind(measure=cname, tune, perf)
+})
+
+print(binom.measures)
+print(cont.measures)
+
+
+vimps <- sapply(fits, function(fit) varImp(fit)$importance$Overall)
+colSums(vimps!=0) # number of features
+vimps[vimps==0] <- NA
+heatmap(vimps, scale="none", col=brewer.pal(9, "YlOrRd"), Colv=NA, Rowv=NA)
 
 
 
