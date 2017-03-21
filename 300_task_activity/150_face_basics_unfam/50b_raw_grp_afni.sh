@@ -20,15 +20,17 @@ die() {
 # ARGS
 ###
 
-njobs=12
+njobs=20
 subjects=( sub01 sub02 sub03 sub04 sub05 sub06 )
-outdir="/data1/famface01/analysis/task_activity/group/face_deviations_unfam/whole_face_alt.reml"
-taskdir_template="/data1/famface01/analysis/task_activity/__SUBJECT__/face_deviations_unfam/whole_face_alt.reml"
+outdir="/data1/famface01/analysis/task_activity/group/face_basics_unfam/raw_demo_trait_feats_sm4.mema"
+taskdir_template="/data1/famface01/analysis/task_activity/__SUBJECT__/face_basics_unfam/raw_demo_trait_feats_sm4.reml"
 
 
 ###
 # SETUP
 ###
+
+scriptdir=$(pwd)
 
 # Make the output directory
 echo
@@ -54,8 +56,11 @@ for subject in ${subjects[@]}; do
 done
 
 echo
-echo "creating group mask"
-run "3dMean -mask_inter -prefix mask.nii.gz subjects/*_mask.nii.gz"
+echo "creating group mask + grey-matter mask"
+run "3dMean -mask_inter -prefix mask_func.nii.gz subjects/*_mask.nii.gz"
+run "3dcalc -a /data1/famface01/analysis/roi/10_Anat/fs_grey_mask_allsubs_dil1-1.nii.gz -expr 'a' -prefix mask_grey.nii.gz"
+#run "3dcalc -a $FSLDIR/data/standard/tissuepriors/2mm/gray_10perc.nii.gz -expr 'a' -prefix mask_grey.nii.gz"
+run "3dcalc -a mask_func.nii.gz -b mask_grey.nii.gz -expr 'step(a)*step(b)' -prefix mask.nii.gz"
 
 echo
 echo "gathering contrasts to run (just the different coef names)"
@@ -129,37 +134,6 @@ run "rm standard_brain_0.5mm.nii.gz"
 ###
 
 echo
-echo "run cluster threshold simulations"
-# gather all the blurs
-run "cat subjects/*_blur_errts.1D > tmp_blur_errts.1D"
-# compute average blur and append
-blurs=( `3dTstat -mean -prefix - tmp_blur_errts.1D\'` )
-echo "average errts blurs: ${blurs[@]}"
-echo "${blurs[@]}" > blur_est.1D
-# clustsim
-fxyz=( `tail -1 blur_est.1D` )
-run "3dClustSim -both -NN 123 -mask mask.nii.gz \
-           -fwhmxyz ${fxyz[@]:0:3} -prefix ClustSim"
-echo "apply cluster results to each output file"
-for cname in ${contrasts[@]}; do
-  run "3drefit -atrstring AFNI_CLUSTSIM_MASK file:ClustSim.mask                \
-          -atrstring AFNI_CLUSTSIM_NN1  file:ClustSim.NN1.niml            \
-          -atrstring AFNI_CLUSTSIM_NN2  file:ClustSim.NN2.niml            \
-          -atrstring AFNI_CLUSTSIM_NN3  file:ClustSim.NN3.niml            \
-          ${outdir}/${cname}+tlrc"
-done
-
-echo
-echo "do the same but on nifti (+ have a liberal threshold)"
-for cname in ${contrasts[@]}; do
-  echo "contrast: ${cname}"
-  run "rm -f thresh_zstats_${cname}.nii.gz thresh_liberal_zstats_${cname}.nii.gz"
-  run "${scriptdir}/./apply_clustsim.R ClustSim.NN3 0.05 0.05 zstats_${cname}.nii.gz thresh_zstats_${cname}.nii.gz"
-  run "${scriptdir}/./apply_clustsim.R ClustSim.NN3 0.1 0.1 zstats_${cname}.nii.gz thresh_liberal_zstats_${cname}.nii.gz"
-  echo
-done
-
-echo
 echo "easythresh"
 run "mkdir easythresh 2> /dev/null"
 run "cd easythresh"
@@ -184,12 +158,51 @@ run "cd -"
 
 echo
 echo "now do FDR"
+mkdir fdr 2> /dev/null
 for cname in ${contrasts[@]}; do
   run "fslmaths zstats_${cname}.nii.gz -abs -ztop pvals_${cname}.nii.gz"
   run "fdr -i pvals_${cname}.nii.gz -m ${cname}_mask.nii.gz -q 0.05 --othresh=fdr_mask_${cname}.nii.gz"
-  run "3dcalc -overwrite -a zstats_${cname}.nii.gz -b fdr_mask_${cname}.nii.gz -expr 'a*step(1-b)' -prefix fdr_zstats_${cname}.nii.gz"
+  run "3dcalc -overwrite -a zstats_${cname}.nii.gz -b fdr_mask_${cname}.nii.gz -expr 'a*step(1-b)' -prefix fdr/fdr_zstats_${cname}.nii.gz"
   run "rm fdr_mask_${cname}.nii.gz pvals_${cname}.nii.gz"
 done
+
+echo
+echo "run cluster threshold simulations"
+# gather all the blurs
+run "cat subjects/*_blur_errts.1D > tmp_blur_errts.1D"
+# compute average blur and append
+blurs=( `3dTstat -mean -prefix - tmp_blur_errts.1D\'` )
+echo "average errts blurs: ${blurs[@]}"
+echo "${blurs[@]}" > blur_est.1D
+# clustsim
+fxyz=( `tail -1 blur_est.1D` )
+run "3dClustSim -both -NN 123 -mask mask.nii.gz \
+           -fwhmxyz ${fxyz[@]:0:3} -prefix ClustSim"
+echo "apply cluster results to each output file"
+for cname in ${contrasts[@]}; do
+  run "3drefit -atrstring AFNI_CLUSTSIM_MASK file:ClustSim.mask                \
+          -atrstring AFNI_CLUSTSIM_NN1  file:ClustSim.NN1.niml            \
+          -atrstring AFNI_CLUSTSIM_NN2  file:ClustSim.NN2.niml            \
+          -atrstring AFNI_CLUSTSIM_NN3  file:ClustSim.NN3.niml            \
+          ${outdir}/${cname}+tlrc"
+done
+
+echo
+echo "do the same but on nifti (+ have a liberal threshold)"
+run "mkdir afnithresh"
+for cname in ${contrasts[@]}; do
+  echo "contrast: ${cname}"
+  #run "rm -f thresh_zstats_${cname}.nii.gz thresh_liberal_zstats_${cname}.nii.gz"
+  run "rm -f afnithresh/thresh_zstats_${cname}.nii.gz afnithresh/thresh_liberal_zstats_${cname}.nii.gz"
+  run "${scriptdir}/./apply_clustsim.R ClustSim.NN3_2sided 0.05 0.05 zstats_${cname}.nii.gz afnithresh/thresh_zstats_${cname}.nii.gz"
+  run "${scriptdir}/./apply_clustsim.R ClustSim.NN3_2sided 0.1 0.1 zstats_${cname}.nii.gz afnithresh/thresh_liberal_zstats_${cname}.nii.gz"
+  echo
+done
+
+echo
+echo "combine easythresh together"
+run "${scriptdir}/./combine_zstats.sh ${outdir}"
+run "${scriptdir}/./combine_zstats_afni.sh ${outdir}"
 
 echo "END"
 

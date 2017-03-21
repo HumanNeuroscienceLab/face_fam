@@ -11,7 +11,7 @@ if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPa
 
 library(plyr)
 
-load("/data1/famface01/command/misc/face_representations/120_features/tmp_combined_fits.rda")
+load("/data1/famface01/command/misc/face_representations/120_features/tmp_combined_fits.rda", verbose=T)
 
 
 ###
