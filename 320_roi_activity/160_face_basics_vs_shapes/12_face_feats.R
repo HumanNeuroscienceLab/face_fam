@@ -1,8 +1,6 @@
 
-
-# This script puts together the 18 or so factor scores collapsing the trait, 
-# demographic and physical information. It then uses the PCA face features to 
-# predict each of those factor scores
+# This script puts together data for the trait/demographic information
+# It will get 6 factor scores for the 10 traits 
 
 
 # Setup -------------------------------------------------------------------
@@ -20,8 +18,6 @@ library(ggplot2)
 source("/data1/famface01/command/encoding/FirstPass/plot_functions.R")
 source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
 
-library(glmnet)
-
 
 # Load Trait Data -----------------------------------------------------------
 
@@ -29,10 +25,19 @@ library(glmnet)
 base <- "/data1/famface01/analysis/encoding/12_Features"
 demos <- read.csv(sprintf('%s/demographics_unfam_df.csv', base))
 demos <- demos[,-1]
-demo.vnames <- demos$video # typo
+df.demos0 <- demos[,-1]
+
+# Get video names
+demo.vnames <- df.demos0$video # typo
 demo.vnames <- sub("_fr[0-9]{3}", "", demo.vnames)
-df.demos    <- demos[,-c(1:2)]
-df.demos    <- df.demos[,-c(6:7)] # remove hair and eye color
+
+# Merge long beard and beard thing 
+df.demos0$facial_hair <- revalue(df.demos0$facial_hair, c("Long beard"="Beard"))
+table(df.demos0$facial_hair)
+
+# Create big matrix with all and a smaller one without video/hair
+df.demos0[,1] <- demo.vnames
+df.demos    <- df.demos0[,-c(1,7)] # remove video, hair
 
 # Load trait information
 base         <- "/data1/famface01/analysis/encoding/12_Features"
@@ -67,6 +72,8 @@ compile.demo.trait <- function(df.demos, df.traits, ret.intercept=TRUE) {
   df.demos2 <- within(df.demos2, facial_hair <- relevel(facial_hair, ref = "None"))
   # Set the reference for race to when white
   df.demos2 <- within(df.demos2, race <- relevel(race, ref = "White"))
+  # Set the reference for eyes to Cannot tell
+  df.demos2 <- within(df.demos2, eye <- relevel(eye, ref = "Cannot tell"))
   # Get the matrix
   mat.demos1 <- formula_to_mat(~.-1, df.demos2)
   mat.demos2 <- formula_to_mat(~., df.demos2) # note this will have the intercept
@@ -159,13 +166,12 @@ corrplot(loading, tl.col='black', tl.cex=.75, diag=T, col=col, is.corr=T)
 # Select Trait Factors ----------------------------------------------------
 
 mat.all2 <- mat.all[,-1]
-#mat.all2 <- mat.all2[,c(1,9,16:25)]
-mat.all2 <- mat.all2[,c(16:25)]
+mat.all2 <- mat.all2[,c(20:29)]
 head(mat.all2)
 
 # Determine the number of components needed
-fa.parallel(mat.all2) # suggests 5 factors
-vss(mat.all2, ncol(mat.all2)) # also suggests 5, 6, 7 or 9 factors
+psych::fa.parallel(mat.all2) # suggests 5 factors
+psych::vss(mat.all2, ncol(mat.all2)) # also suggests 5, 6, 7 or 9 factors
 
 # Get the factors (VSS complexity 2 maximizes at 6)
 fac.res <- psych::fa(mat.all2, nfactors=6, residuals=T, rotate='varimax', 
@@ -197,108 +203,50 @@ colnames(fac.scores) <- fac.names
 # Other Features ----------------------------------------------------------
 
 mat.all3 <- mat.all[,-1]
-mat.all3 <- mat.all3[,-c(16:25)]
+mat.all3 <- mat.all3[,-c(20:29)]
 
 # split up
-facial.hair <- mat.all3[,c(2:7)]
-race <- mat.all3[,10:14]
-misc <- mat.all3[,c(1,8,9,15)]
+facial.hair <- mat.all3[,c(2:6)]
+race <- mat.all3[,9:13]
+eye <- mat.all3[,14:18]
+misc <- mat.all3[,c(1,7,8,19)] # age, makeup, gender, glasses
 
 # Combine it all back
-all.mat <- cbind(fac.scores, misc, facial.hair, race)
-all.groups <- rep(c("traits", "age", "makeup", "gender", "glasses", "facial_hair", "race"), c(ncol(fac.scores), 1, 1, 1, 1, ncol(facial.hair), ncol(race)))
+all.mat <- cbind(fac.scores, misc, facial.hair, race, eye)
+all.groups <- rep(c("traits", "age", "makeup", "gender", "glasses", "facial_hair", "race", "eye"), c(ncol(fac.scores), 1, 1, 1, 1, ncol(facial.hair), ncol(race), ncol(eye)))
+
+
+# Plots -------------------------------------------------------------------
+
+# Basic breakdowns of the factors
+table(df.demos$gender)
+table(df.demos$facial_hair)
+table(df.demos$race)
+table(df.demos$glasses)
+table(df.demos0$hair)
+table(df.demos0$eye)
+
+# Plot all
+cols <- brewer.pal(11, "RdBu")
+heatmap(all.mat, col=rev(cols), scale="none", labRow=F, margins=c(7,5))
+## other version
+hc.cols <- hclust(dist(t(all.mat)), method="ward.D2")
+hc.rows <- hclust(dist(all.mat), method="ward.D2")
+heatmap(all.mat, col=rev(cols), Colv=as.dendrogram(hc.cols), Rowv=as.dendrogram(hc.rows), 
+        scale="none", labRow=F, margins=c(7,5))
 
 
 
-# Classification Functions --------------------------------------------
+# Save ------------------------------------------------------------------- 
 
-source("/data1/famface01/command/misc/face_representations/misc/cv_glmnet.R")
+# we save the 0th demos with more stuff in it
+write.csv(df.demos0, "/data1/famface01/analysis/misc/320_roi_task_activity/12_facefeats_df-demos.csv")
+write.table(demo.vnames, "/data1/famface01/analysis/misc/320_roi_task_activity/12_facefeats_demo-vnames.txt", 
+            row.names=F, col.names=F)
 
+write.csv(all.mat, "/data1/famface01/analysis/misc/320_roi_task_activity/12_facefeats_all-mat.csv")
+write.table(all.groups, "/data1/famface01/analysis/misc/320_roi_task_activity/12_facefeats_all-groups.txt", 
+            row.names=F, col.names=F)
 
-# Classification ----------------------------------------------------------
+write.csv(X, "/data1/famface01/analysis/misc/320_roi_task_activity/12_facefeats_sym-shape-texture.csv")
 
-
-
-
-# Predict the scores
-# for each score, we repeat the process 10 times
-library(cvTools)
-nreps <- 10
-cfolds <- cvFolds(nrow(fac.scores), K=10, R=nreps)
-cvrep.fits <- llply(1:ncol(fac.scores), function(i) {
-  y <- fac.scores[,i]
-  lapply(1:nreps, function(i) {
-    foldid <- cfolds$which[cfolds$subsets[,i]]
-    run_cvglmnet(X, y, foldid=foldid, parallel=F, exclude.zero=T)
-  })
-}, .parallel=T)
-names(cvrep.fits) <- colnames(fac.scores)
-
-# Calculate the average model fits across the 10 repeats
-cvrep.r2s <- sapply(cvrep.fits, function(fits) {
-  sapply(fits, function(x) x$bestfit$val)
-})
-fac.r2s <- colMeans(cvrep.r2s)
-round(fac.r2s, 3)
-
-# Combine the predicted values
-fac.preds <- sapply(cvrep.fits, function(fits) {
-  predvals <- sapply(fits, function(x) x$bestfit$preval)
-  predvals <- rowMeans(predvals)
-  return(predvals)
-})
-
-# Get the residuals
-fac.resids <- sapply(1:ncol(fac.preds), function(i) {
-  lm(fac.scores[,i] ~ fac.preds[,i])$residuals
-})
-
-# Combine the r2 values across the lambdas
-mat.cvr2s <- lapply(cvrep.fits, function(fits) {
-  lambda <- fits[[1]]$lambda
-  cvr2   <- matrix(fits[[1]]$measures$rsq, nrow=1)
-  cvnz   <- matrix(fits[[1]]$nzero, nrow=1)
-  for (i in 2:nreps) {
-    lambda0 <- fits[[i]]$lambda
-    rsq0    <- fits[[i]]$measures$rsq
-    nzeros0 <- fits[[i]]$nzero
-    
-    newlambda <- intersect(lambda, lambda0)
-    cvr2      <- rbind(cvr2[,is.element(lambda, newlambda)], 
-                       rsq0[is.element(lambda0, newlambda)])
-    cvnz      <- rbind(cvnz[,is.element(lambda, newlambda)], 
-                       nzeros0[is.element(lambda0, newlambda)])
-    lambda    <- newlambda
-  }
-  # average across the repeats
-  cbind(lambda=lambda, rsq=colMeans(cvr2), nzeros=colMeans(cvnz))
-})
-maxlambdas <- sapply(mat.cvr2s, function(x) {
-  max.rsq <- max(x[x[,3] > 0, 2]) # not necessary as all are non-zero
-  wmax.rsq<- x[,2] == max.rsq
-  x[wmax.rsq,1]
-})
-## double check that not getting zero coefficients
-sapply(mat.cvr2s, function(x) x[which.max(x[,2]),3])
-
-# Determine the coefficients from the full model
-# using the lambda with the best r2
-## get full model fit first
-full.fits <- lapply(1:ncol(fac.scores), function(i) {
-  glmnet(X, fac.scores[,i], family="gaussian", lambda=maxlambdas[i])
-})
-names(full.fits) <- colnames(fac.scores)
-## compile the coefficients
-fac.coefs <- sapply(full.fits, function(x) as.vector(x$beta))
-## note: two of the factors (9 and 16) have all non-zero values
-round(colMeans(fac.coefs!=0), 2)
-
-# # of coefs relative to # of r2
-plot(round( cbind(colMeans(fac.coefs!=0), fac.r2s), 3 ))
-
-# So we finally need to save this somehow, right
-pca.face.feats <- X
-outdir <- "/data1/famface01/analysis/misc/320_roi_task_activity"
-dir.create(outdir)
-save(fac.loads, pca.face.feats, fac.r2s, fac.preds, fac.resids, fac.coefs, fac.scores, demo.vnames, 
-     file=file.path(outdir, "20_predict_face_feats.rda"))

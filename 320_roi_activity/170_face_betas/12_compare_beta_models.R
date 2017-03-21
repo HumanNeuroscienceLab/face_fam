@@ -40,6 +40,9 @@ load.cur <- function(subj) {
 dat.vols <- lapply(subjects, load.cur)
 names(dat.vols) <- subjects
 
+# Std Data
+load("/data1/famface01/analysis/misc/320_roi_task_activity/std_roi_dat.rda", verbose=T)
+
 # Features
 indir <- "/data1/famface01/analysis/misc/320_roi_task_activity"
 load(file.path(indir, "20_predict_face_feats.rda"), verbose=T)
@@ -249,11 +252,14 @@ other.trials <- convolve.spm.hrf(onsets2, durs2, tot.time, runs)
 dmat <- model.matrix(~cur.trial[,1:2] + other.trials[,1:2] + quests + days + repeat.faces + mc + fds)
 ret.fit <- simple_lm(rdats, dmat)
 
+
+
 # Do the regular one
 sub.bs1 <- laply(subjects, function(subj) {
   dat <- dat.vols[[subj]]
   
-  rdats <- sapply(dat$fmri$dat, rowMeans)
+  #rdats <- sapply(dat$fmri$dat, rowMeans)
+  rdats <- std.rdats2[ssubs==subj,]
   
   runs <- dat$fmri$runs
   tot.time <- length(runs)
@@ -265,7 +271,7 @@ sub.bs1 <- laply(subjects, function(subj) {
   # Questions
   onsets3 <- vid.timing$onset[vid.timing$question!="none"]
   durs3   <- 4
-  quests  <- convolve.hrf(onsets3, durs3, tot.time, runs)
+  quests  <- convolve.hrf(onsets3, durs3, tot.time, runs, frate=1/12)
   # Day of scan
   days <- factor(runs)
   days <- mapvalues(days, from=1:16, to=rep(1:4,each=4))
@@ -275,7 +281,7 @@ sub.bs1 <- laply(subjects, function(subj) {
   repeat.day <- mapvalues(repeat.day, from=1:16, to=rep(c(1,2,1,2),each=4))
   onsets4    <- vid.timing$onset[repeat.day==2]
   durs4      <- vid.timing$duration[repeat.day==2]
-  repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs)
+  repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs, frate=1/12)
   # Motion
   mc <- load.mc(subj)
   fds <- load.fds(subj)
@@ -285,12 +291,12 @@ sub.bs1 <- laply(subjects, function(subj) {
     # Particular trial
     onsets1   <- vid.timing$onset[vid.timing$video == vname]
     durs1     <- vid.timing$duration[vid.timing$video == vname]
-    cur.trial <- convolve.hrf(onsets1, durs1, tot.time, runs)
+    cur.trial <- convolve.hrf(onsets1, durs1, tot.time, runs, frate=1/12)
     
     # All other trials
     onsets2 <- vid.timing$onset[vid.timing$video != vname]
     durs2   <- vid.timing$duration[vid.timing$video != vname]
-    other.trials <- convolve.hrf(onsets2, durs2, tot.time, runs)
+    other.trials <- convolve.hrf(onsets2, durs2, tot.time, runs, frate=1/12)
     
     # Run regression
     dmat <- model.matrix(~cur.trial + other.trials + quests + days + repeat.faces + mc + fds)
@@ -312,7 +318,8 @@ sub.bs1 <- laply(subjects, function(subj) {
 sub.bs2 <- laply(subjects, function(subj) {
   dat <- dat.vols[[subj]]
   
-  rdats <- sapply(dat$fmri$dat, rowMeans)
+  #rdats <- sapply(dat$fmri$dat, rowMeans)
+  rdats <- std.rdats2[ssubs==subj,]
   
   runs <- dat$fmri$runs
   tot.time <- length(runs)
@@ -324,7 +331,7 @@ sub.bs2 <- laply(subjects, function(subj) {
   # Questions
   onsets3 <- vid.timing$onset[vid.timing$question!="none"]
   durs3   <- 4
-  quests  <- convolve.hrf(onsets3, durs3, tot.time, runs)
+  quests  <- convolve.spm.hrf(onsets3, durs3, tot.time, runs, nparams=2, frate=1/12)
   # Day of scan
   days <- factor(runs)
   days <- mapvalues(days, from=1:16, to=rep(1:4,each=4))
@@ -334,7 +341,7 @@ sub.bs2 <- laply(subjects, function(subj) {
   repeat.day <- mapvalues(repeat.day, from=1:16, to=rep(c(1,2,1,2),each=4))
   onsets4    <- vid.timing$onset[repeat.day==2]
   durs4      <- vid.timing$duration[repeat.day==2]
-  repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs)
+  repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs, frate=1/12)
   # Motion
   mc <- load.mc(subj)
   fds <- load.fds(subj)
@@ -372,7 +379,8 @@ sub.bs2 <- laply(subjects, function(subj) {
 sub.bs3 <- laply(subjects, function(subj) {
   dat <- dat.vols[[subj]]
   
-  rdats <- sapply(dat$fmri$dat, rowMeans)
+  #rdats <- sapply(dat$fmri$dat, rowMeans)
+  rdats <- std.rdats2[ssubs==subj,]
   
   runs <- dat$fmri$runs
   tot.time <- length(runs)
@@ -384,7 +392,7 @@ sub.bs3 <- laply(subjects, function(subj) {
   # Questions
   onsets3 <- vid.timing$onset[vid.timing$question!="none"]
   durs3   <- 4
-  quests  <- convolve.hrf(onsets3, durs3, tot.time, runs)
+  quests  <- convolve.spm.hrf(onsets3, durs3, tot.time, runs, nparams=2, frate=1/12)
   # Day of scan
   days <- factor(runs)
   days <- mapvalues(days, from=1:16, to=rep(1:4,each=4))
@@ -394,7 +402,7 @@ sub.bs3 <- laply(subjects, function(subj) {
   repeat.day <- mapvalues(repeat.day, from=1:16, to=rep(c(1,2,1,2),each=4))
   onsets4    <- vid.timing$onset[repeat.day==2]
   durs4      <- vid.timing$duration[repeat.day==2]
-  repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs)
+  repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs, frate=1/12)
   # Motion
   mc <- load.mc(subj)
   fds <- load.fds(subj)
@@ -428,17 +436,98 @@ sub.bs3 <- laply(subjects, function(subj) {
 }, .progress="text")
 
 
-# Compare correlation btw subjects for the two
+sub.bs4 <- laply(subjects, function(subj) {
+  dat <- dat.vols[[subj]]
+  
+  #rdats <- sapply(dat$fmri$dat, rowMeans)
+  rdats <- std.rdats2[ssubs==subj,]
+  
+  runs <- dat$fmri$runs
+  tot.time <- length(runs)
+  
+  vid.timing <- dat$basics$timing
+  vnames <- sort(levels(vid.timing$video))
+  
+  ## Covars (same throughout)
+  # Questions
+  onsets3 <- vid.timing$onset[vid.timing$question!="none"]
+  durs3   <- 4
+  quests  <- convolve.spm.hrf(onsets3, durs3, tot.time, runs, nparams=1, frate=1/12)
+  # Day of scan
+  days <- factor(runs)
+  days <- mapvalues(days, from=1:16, to=rep(1:4,each=4))
+  days <- model.matrix(~days)[,-1] # matrix of 1s 0s ... no intercept
+  # Repeat days (on the second and fourth day we repeat the stimuli)
+  repeat.day <- factor(vid.timing$run)
+  repeat.day <- mapvalues(repeat.day, from=1:16, to=rep(c(1,2,1,2),each=4))
+  onsets4    <- vid.timing$onset[repeat.day==2]
+  durs4      <- vid.timing$duration[repeat.day==2]
+  repeat.faces <- convolve.hrf(onsets4, durs4, tot.time, runs, frate=1/12)
+  # Motion
+  mc <- load.mc(subj)
+  fds <- load.fds(subj)
+  
+  # Loop through each video and process
+  system.time(vid.bs <- laply(vnames, function(vname) {
+    # Particular trial
+    onsets1   <- vid.timing$onset[vid.timing$video == vname]
+    durs1     <- vid.timing$duration[vid.timing$video == vname]
+    cur.trial <- convolve.spm.hrf(onsets1, durs1, tot.time, runs, nparams=1, frate=1/12)
+    
+    # All other trials
+    onsets2 <- vid.timing$onset[vid.timing$video != vname]
+    durs2   <- vid.timing$duration[vid.timing$video != vname]
+    other.trials <- convolve.spm.hrf(onsets2, durs2, tot.time, runs, nparams=1, frate=1/12)
+    
+    # Run regression
+    dmat <- model.matrix(~cur.trial + other.trials + quests + days + repeat.faces + mc + fds)
+    ret.fit <- simple_lm(rdats, dmat)
+    
+    # Get the betas and tvals for the current trial estimate
+    bs <- ret.fit$b[2,]
+    ts <- ret.fit$tvals[2,]
+    
+    cbind(betas=bs, tvals=ts)
+  }, .parallel=T))
+  dimnames(vid.bs)[[1]] <- vnames
+  names(dimnames(vid.bs)) <- c("vid", "roi", "measure")
+  
+  return(vid.bs)
+}, .progress="text")
+
+
+# Compare correlation btw subjects for the double gamma and gamma + deriv
 betas.comp <- sapply(1:11, function(i) {
   mean((cor(t(sub.bs1[,,i,1])) - cor(t(sub.bs2[,,i,1])))[lower.tri(matrix(0,6,6))])
 })
 table(sign(betas.comp))
 tvals.comp <- sapply(1:11, function(i) {
-  mean((cor(t(sub.bs1[,,i,1])) - cor(t(sub.bs2[,,i,1])))[lower.tri(matrix(0,6,6))])
+  mean((cor(t(sub.bs1[,,i,2])) - cor(t(sub.bs2[,,i,2])))[lower.tri(matrix(0,6,6))])
 })
 table(sign(tvals.comp))
-## compare the tvals...it's always better with the 2param model
+# Actually using the gamma one is better than the double gamma (by a little)
+betas.comp <- sapply(1:11, function(i) {
+  mean((cor(t(sub.bs4[,,i,1])) - cor(t(sub.bs1[,,i,1])))[lower.tri(matrix(0,6,6))])
+})
+table(sign(betas.comp))
+tvals.comp <- sapply(1:11, function(i) {
+  mean((cor(t(sub.bs4[,,i,2])) - cor(t(sub.bs1[,,i,2])))[lower.tri(matrix(0,6,6))])
+})
+table(sign(tvals.comp))
+# Having the derivative does seem to help
+betas.comp <- sapply(1:11, function(i) {
+  mean((cor(t(sub.bs4[,,i,1])) - cor(t(sub.bs2[,,i,1])))[lower.tri(matrix(0,6,6))])
+})
+table(sign(betas.comp))
+tvals.comp <- sapply(1:11, function(i) {
+  mean((cor(t(sub.bs4[,,i,2])) - cor(t(sub.bs2[,,i,2])))[lower.tri(matrix(0,6,6))])
+})
+table(sign(tvals.comp))
+
+## compare the tvals...it's always better with the 1param model
 table(sign(colMeans(sapply(1:11, function(i) rowMeans(sub.bs1[,,i,2] - sub.bs2[,,i,2])))))
+table(sign(colMeans(sapply(1:11, function(i) rowMeans(sub.bs1[,,i,2] - sub.bs4[,,i,2])))))
+table(sign(colMeans(sapply(1:11, function(i) rowMeans(sub.bs2[,,i,2] - sub.bs4[,,i,2])))))
 
 
 
@@ -447,7 +536,7 @@ table(sign(colMeans(sapply(1:11, function(i) rowMeans(sub.bs1[,,i,2] - sub.bs2[,
 # Get group average
 grp.bs1 <- apply(sub.bs1, 2:4, mean)
 grp.bs2 <- apply(sub.bs2, 2:4, mean)
-grp.bs3 <- apply(sub.bs3a, 2:4, mean)
+grp.bs3 <- apply(sub.bs4, 2:4, mean)
 
 # Prep the factors to regress
 vnames <- dimnames(sub.bs2)$vid
@@ -481,6 +570,7 @@ sfit3b <- summary(fit3b)
 ## oh full model fit is better for the regular HRF!!!
 table(sign(sapply(sfit1t, function(x) x$adj.r.squared) - sapply(sfit2t, function(x) x$adj.r.squared)))
 table(sign(sapply(sfit1b, function(x) x$adj.r.squared) - sapply(sfit2b, function(x) x$adj.r.squared)))
+table(sign(sapply(sfit1b, function(x) x$adj.r.squared) - sapply(sfit3b, function(x) x$adj.r.squared)))
 ## compare beta to tval....tval wins!
 table(sign(sapply(sfit1b, function(x) x$adj.r.squared) - sapply(sfit1t, function(x) x$adj.r.squared)))
 
@@ -491,6 +581,11 @@ round(sapply(sfit1t, function(x) x$adj.r.squared), 3)
 cor(t(sub.bs1[,,3,2]))
 
 # okay so now with the tvals try to do an aov to compare models
+bs.tvals <- grp.bs3[,,2]
+fit <- aov(bs.tvals ~ fac.preds2 + fac.resids2 + pca.feats2)
+sfit <- summary(fit)
+sfit[[3]]
+
 bs.tvals <- grp.bs1[,,2]
 fit <- aov(bs.tvals ~ fac.preds2 + fac.resids2 + pca.feats2)
 sfit <- summary(fit)

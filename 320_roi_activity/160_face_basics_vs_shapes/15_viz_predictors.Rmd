@@ -1,0 +1,276 @@
+---
+title: "Predicting Face Features"
+author: "Zarrar Shehzad"
+date: "March 4, 2017"
+output: html_document
+---
+
+We visualize predicting different face features (e.g., traits and age) using the shape/texture PCA components.
+
+# Setup
+
+```{r}
+# Path for my own packages
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+
+# General workhorse function
+library(plyr)
+
+# Parallelization
+suppressMessages(library(doMC))
+registerDoMC(24)
+
+# If we were to use ggplot2 and other plotting needs
+library(RColorBrewer)
+library(ggplot2)
+source("/data1/famface01/command/encoding/FirstPass/plot_functions.R")
+
+# This gets us the simple_lm function for faster GLMs
+source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
+```
+
+## Load
+
+```{r}
+load("/data1/famface01/analysis/misc/320_roi_task_activity/40_predict_face_feats_df.rda", verbose=T)
+```
+
+# Visualize
+
+## Fits
+
+### Gaussian
+
+Gaussian type fits. Typical and memorable are not doing all that well. We are really able to predict whether someone has makeup or not and if they are unemotional or not.
+
+```{r}
+rsqs <- sapply(cvrep.gaussian, function(x) x$mean.max.res)
+mar <- par()$mar; par(mar = mar + c(2,0,0,0))
+barplot(rsqs, las=2, ylab="Model R-squared")
+par(mar=mar)
+```
+
+### Multinomial
+
+Multinomial type fits. Notice that the accuracies are all significant except for the eyes. So we aren't able to the predict eye color based on the shape/texture data. Funny that hair is even significant where eyes are not. Maybe if I ran some analysis restricting the face features to just the eyes, it would do better. Note that most of the time the data, chooses the baseline or largest class.
+
+```{r}
+df.acc <- ldply(names(cvrep.multinomial), function(name) {
+  confmat <- caret::confusionMatrix(cvrep.multinomial[[name]]$fitted.class, df2[[name]])
+  c(name=name, confmat$overall)
+})
+df.acc1 <- df.acc
+print(df.acc)
+```
+
+```{r}
+sdf <- as.matrix(subset(df.acc, select=c("Accuracy", "AccuracyNull")))
+sdf <- matrix(as.numeric(sdf), nrow(sdf), ncol(sdf))
+dimnames(sdf) <- list(measure=names(cvrep.multinomial), c("Accuracy", "Acc-Null"))
+barplot(t(sdf), beside=T, legend=T, sub = "All significant except eye")
+```
+
+### Binomial
+
+Both of these binomial measures do excedingly well, especially gender.
+
+```{r}
+df.acc <- ldply(names(cvrep.binomial), function(name) {
+  confmat <- caret::confusionMatrix(cvrep.binomial[[name]]$fitted.class, df2[[name]])
+  c(name=name, confmat$overall)
+})
+df.acc2 <- df.acc
+print(df.acc)
+```
+
+```{r}
+sdf <- as.matrix(subset(df.acc, select=c("Accuracy", "AccuracyNull")))
+sdf <- matrix(as.numeric(sdf), nrow(sdf), ncol(sdf))
+dimnames(sdf) <- list(measure=names(cvrep.binomial), c("Accuracy", "Acc-Null"))
+barplot(t(sdf), beside=T, legend=T, sub = "Both significant")
+```
+
+## Predicted/Residual Values
+
+### Gaussian Fits
+
+This will show the raw data, predicted, and residuals of the features. To make viewing easier, I have scaled each of the matrices. Also remember that the first 6 trait measures are actually factor scores. And all the rows are arranged in the same fashion, according to the raw data.
+
+```{r}
+# vals
+predvals  <- sapply(cvrep.gaussian, function(x) x$fitted)
+residvals <- sapply(cvrep.gaussian, function(x) x$resid)
+
+# colors
+cols <- rev(colorRampPalette(brewer.pal(11, "RdBu"))(100))
+
+# arrange rows
+#mat <- (scale(predvals) + scale(df2[,c(1:7,9)]))/2
+mat <- scale(df2[,c(1:7,9)])
+hc.rows <- hclust(dist(mat), method="ward.D2")
+
+# Raw data
+mat <- scale(df2[,c(1:7,9)])
+zlim <- max(abs(mat)) * c(-1,1)
+heatmap(as.matrix(mat), scale="none", col=cols, 
+        zlim=zlim, Colv=NA, labRow=NA, Rowv=as.dendrogram(hc.rows), 
+        margins=c(7,5), cexCol = 1.25, cexRow = 1.25, main="Raw Data")
+
+# Predicted features
+mat <- scale(predvals)
+zlim <- max(abs(mat)) * c(-1,1)
+heatmap(mat, scale="none", col=cols, 
+        zlim=zlim, Colv=NA, labRow=NA, Rowv=as.dendrogram(hc.rows), 
+        margins=c(7,5), cexCol = 1.25, cexRow = 1.25, main="Predicted Features")
+
+# Residuals
+mat <- scale(residvals)
+zlim <- max(abs(mat)) * c(-1,1)
+heatmap(mat, scale="none", col=cols, 
+        zlim=zlim, Colv=NA, labRow=NA, Rowv=as.dendrogram(hc.rows), 
+        margins=c(7,5), cexCol = 1.25, cexRow = 1.25, main="Residuals")
+```
+
+### Multinomial Fits
+
+We first see what's happening with the class labels. Again both rows are arranged according to the raw data.
+
+```{r}
+predclasses1 <- predclasses <- data.frame(sapply(cvrep.multinomial, function(x) x$fitted.class))
+rawclasses1  <- rawclasses  <- subset(df2, select=colnames(predclasses))
+
+# Arrange rows
+mat <- sapply(1:ncol(predclasses), function(i) as.numeric(factor(rawclasses[,i], levels=levels(rawclasses[,i]))))
+hc.rows <- hclust(dist(mat), method="ward.D2")
+
+# Raw data
+mat <- sapply(1:ncol(predclasses), function(i) as.numeric(factor(rawclasses[,i], levels=levels(rawclasses[,i]))))
+colnames(mat) <- colnames(predclasses)
+cols <- brewer.pal(max(mat), "Set3")
+heatmap(mat, scale="none", col=cols, Colv=NA, labRow=NA, Rowv=as.dendrogram(hc.rows), cexCol=1.25, main="Raw")
+
+# Predicted vals
+mat <- sapply(1:ncol(predclasses), function(i) as.numeric(factor(predclasses[,i], levels=levels(rawclasses[,i]))))
+colnames(mat) <- colnames(predclasses)
+cols <- brewer.pal(max(mat), "Set3")
+heatmap(mat, scale="none", col=cols, Colv=NA, labRow=NA, Rowv=as.dendrogram(hc.rows), cexCol=1.25, main="Predicted")
+```
+
+We can also take a look at the probability values. Note this expands to have each class with a separate column.
+
+```{r}
+predprobs1 <- predprobs <- data.frame(sapply(cvrep.multinomial, function(x) x$fitted))
+residprobs1 <- residprobs <- data.frame(sapply(cvrep.multinomial, function(x) x$resids))
+mn.cnames1 <- mn.cnames <- unlist(lapply(names(cvrep.multinomial), function(x) levels(df2[[x]])))
+head(predprobs)
+
+cols <- colorRampPalette(brewer.pal(9, "YlOrRd"))(100)
+mat <- as.matrix(predprobs)
+zlim <- c(0,1)
+heatmap(mat, scale="none", col=cols, 
+        zlim=zlim, Colv=NA, labRow=NA, Rowv=as.dendrogram(hc.rows), 
+        margins=c(7,5), cexCol = 1.25)
+heatmap(mat, scale="none", col=cols, 
+        zlim=zlim, Colv=NA, labCol=mn.cnames, labRow=NA, Rowv=as.dendrogram(hc.rows), 
+        margins=c(7,5), cexCol = 1.25) # just get more detailed column names
+```
+
+
+### Binomial Fits
+
+Like with the multinomial fits, we first look at the class labels.
+
+```{r}
+predclasses2 <- predclasses <- data.frame(sapply(cvrep.binomial, function(x) x$fitted.class))
+rawclasses2  <- rawclasses  <- subset(df2, select=colnames(predclasses))
+
+# Arrange rows
+mat <- sapply(1:ncol(predclasses), function(i) as.numeric(factor(rawclasses[,i], levels=levels(rawclasses[,i]))))
+hc.rows <- hclust(dist(mat), method="ward.D2")
+
+# Raw data
+mat <- sapply(1:ncol(predclasses), function(i) as.numeric(factor(rawclasses[,i], levels=levels(rawclasses[,i]))))
+colnames(mat) <- colnames(predclasses)
+cols <- brewer.pal(max(mat), "Set3")[1:ncol(mat)]
+heatmap(mat, scale="none", col=cols, Colv=NA, labRow=NA, Rowv=as.dendrogram(hc.rows), cexCol=1.25, main="Raw")
+
+# Predicted vals
+mat <- sapply(1:ncol(predclasses), function(i) as.numeric(factor(predclasses[,i], levels=levels(rawclasses[,i]))))
+colnames(mat) <- colnames(predclasses)
+cols <- brewer.pal(max(mat), "Set3")[1:ncol(mat)]
+heatmap(mat, scale="none", col=cols, Colv=NA, labRow=NA, Rowv=as.dendrogram(hc.rows), cexCol=1.25, main="Predicted")
+```
+
+```{r}
+predprobs2 <- predprobs <- data.frame(sapply(cvrep.binomial, function(x) x$fitted))
+residprobs2 <- residprobs <- data.frame(sapply(cvrep.binomial, function(x) x$resids))
+mn.cnames2 <- mn.cnames <- unlist(lapply(names(cvrep.binomial), function(x) levels(df2[[x]])))
+head(predprobs)
+
+cols <- colorRampPalette(brewer.pal(9, "YlOrRd"))(100)
+mat <- as.matrix(predprobs)
+zlim <- c(0,1)
+heatmap(mat, scale="none", col=cols, 
+        zlim=zlim, Colv=NA, labRow=NA, Rowv=as.dendrogram(hc.rows), 
+        margins=c(5,5), cexCol = 1.25)
+```
+
+
+## Save
+
+First, we need to do a quick hack and make a residual from the class variable.
+
+```{r}
+# Multinomial
+residclass1 <- llply(colnames(res.multinomial$predclass), function(cn) {
+  y <- res.multinomial$rawclass[[cn]]
+  x <- res.multinomial$predclass[[cn]]
+  resids <- nnet::multinom(y ~ x, maxit=500)$residuals
+  resids
+})
+residclass1 <- do.call(cbind, residclass1)
+colnames(residclass1) <- colnames(res.multinomial$residprobs)
+
+# Binomial
+residclass2 <- sapply(colnames(res.binomial$predclass), function(cn) {
+  y <- res.binomial$rawclass[[cn]]
+  x <- res.binomial$predclass[[cn]]
+  resids <- glm(y ~ x, family=binomial(link='logit'))$resid
+  resids
+})
+
+# Add back
+res.multinomial$residclass <- residclass1
+res.binomial$residclass <- residclass2
+```
+
+Finally save the needed things. Rename the variables and save.
+
+```{r}
+res.gaussian <- list(
+  rsqs = rsqs, 
+  predvals = predvals, 
+  residvals = residvals
+)
+
+res.multinomial <- list(
+  accuracy = df.acc1, 
+  predclass = predclasses1, 
+  rawclass = rawclasses1, 
+  predprobs = predprobs1, 
+  residprobs = residprobs1, 
+  cnames = mn.cnames1
+)
+
+res.binomial <- list(
+  accuracy = df.acc2, 
+  predclass = predclasses2, 
+  rawclass = rawclasses2, 
+  predprobs = predprobs2, 
+  residprobs = residprobs2, 
+  cnames = mn.cnames2
+)
+
+save(vnames, res.gaussian, res.multinomial, res.binomial, file="/data1/famface01/analysis/misc/320_roi_task_activity/41_predictors.rda")
+```

@@ -1,0 +1,241 @@
+---
+title: "GLM+Lasso Predicted FaceFeats"
+author: "Zarrar Shehzad"
+date: "March 5, 2017"
+output: html_document
+---
+
+## Setup
+
+Load a bunch of packages and functions.
+
+```{r}
+# Path for my own packages
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+
+# General workhorse function
+library(plyr)
+
+# Parallelization
+suppressMessages(library(doMC))
+registerDoMC(24)
+
+# If we were to use ggplot2 and other plotting needs
+library(RColorBrewer)
+library(ggplot2)
+source("/data1/famface01/command/encoding/FirstPass/plot_functions.R")
+
+# This gets us the simple_lm function for faster GLMs
+source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
+
+## For heatmap.2
+#suppressMessages(library(gplots))
+## For our own custom convolution
+#source("/data1/famface01/command/encoding/ShapesAnalysis/000_funs_load_convolve.R")
+```
+
+And some general variable of interest.
+
+```{r}
+subjects <- sprintf("sub%02i", 1:6) # again skipping sub01
+#indir    <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+rnames   <- c("r.vATL","r.aFFA", "r.pFFA", "r.OFA", "r.EBA", 'r.Amyg', 
+              "l.vATL", "l.FFA", "l.OFA", "l.EBA", 'l.Amyg')
+```
+
+
+### Load
+
+#### Predicted/Residual Face Features
+
+Load the convolved features for the raw data and then the convolved predicted/residual face features.
+
+```{r}
+ifile <- "/data1/famface01/analysis/misc/320_roi_task_activity/22_convolve_facefeats.rda"
+load(ifile, verbose=T)
+
+ifile <- "/data1/famface01/analysis/misc/320_roi_task_activity/24_predict_convolve.rda"
+load(ifile, verbose=T)
+```
+
+#### ROI Data
+
+Then first, get the ROI data.
+
+```{r}
+load.cur <- function(subj) {
+  indir <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+  infile <- sprintf("%s/roi_n_more_%s.rda", indir, subj)
+  dat <- NULL
+  load(infile)
+  dat
+}
+
+dat.vols <- lapply(subjects, load.cur)
+names(dat.vols) <- subjects
+```
+
+We compile the average of each ROI (for now). And load the standard space ROIs. We won't use the `rdats` actually.
+
+```{r}
+lst.rdats <- lapply(dat.vols, function(dat) {
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  rdats
+})
+rdats <- do.call(rbind, lst.rdats)
+
+load("/data1/famface01/analysis/misc/320_roi_task_activity/std_roi_dat.rda", verbose=T)
+```
+
+
+
+## Regressions: All Data
+
+```{r}
+# Raw vals
+X <- model.matrix(~ssubs + smcs + sfaces + smats)
+fit1 <- simple_lm(std.rdats2, X)
+fit1$tvals
+```
+
+Plot as heatmap
+
+```{r}
+cols <- colorRampPalette(rev(brewer.pal(11, "RdBu")))(100)
+all.grps2 <- c("face",all.grps)
+ccols <- factor(all.grps2, levels=levels(factor(all.grps2)), 
+                labels=rev(brewer.pal(length(unique(all.grps2)), "Set3")))
+ccols <- as.character(ccols)
+
+mat <- t(fit1$tvals[-c(1:12),])
+colnames(mat) <- sub("smats", "", colnames(mat))
+
+tmat <- mat * (abs(mat) > 1.96)
+#hc.cols <- hclust(dist(t(tmat)), method="ward.D2")
+zlim <- max(abs(tmat)) * c(-1,1)
+tmat[tmat==0] <- NA
+
+# separator lines
+seplines <- c(0,cumsum(rle(all.grps2)$lengths)) + 0.5
+
+heatmap(tmat, scale="none", col=cols, ColSideColors = ccols, 
+        zlim=zlim, Rowv=NA, Colv=NA, 
+        margins=c(9,5), cexCol = 1.25, cexRow = 1.25, 
+        add.expr = abline(v=seplines, h=6.5, col="grey50"))
+```
+
+```{r}
+fit0 <- simple_lm(std.rdats.all$r.EBA, X)
+
+mat <- t(fit0$tvals[-c(1:12),])
+colnames(mat) <- sub("smats", "", colnames(mat))
+
+tmat <- mat * (abs(mat) > 1.96)
+hc.rows <- hclust(dist(tmat), method="ward.D2")
+zlim <- max(abs(tmat)) * c(-1,1)
+tmat[tmat==0] <- NA
+
+# separator lines
+seplines <- c(0,cumsum(rle(all.grps2)$lengths)) + 0.5
+
+heatmap(tmat, scale="none", col=cols, ColSideColors = ccols, 
+        zlim=zlim, Rowv=as.dendrogram(hc.rows), Colv=NA, labRow = F, 
+        margins=c(9,5), cexCol = 1.25, cexRow = 1.25, 
+        add.expr = abline(v=seplines, h=6.5, col="grey50"))
+```
+
+
+```{r}
+# Predicted vals
+preds  <- spreds1[,c(1:8,30:31)]#,9:10,12,13:17,19:21,23)]
+resids <- sresids1[,c(1:8,30:31)]#,9:10,12,13:17,19:21,23)]
+X      <- model.matrix(~ssubs + smcs + sfaces + preds + resids)
+fit2 <- simple_lm(std.rdats2, X[,1:17])
+fit2$tvals
+```
+
+```{r}
+cols <- colorRampPalette(rev(brewer.pal(11, "RdBu")))(100)
+all.grps2 <- c("face",all.grps)
+ccols <- factor(all.grps2, levels=levels(factor(all.grps2)), 
+                labels=rev(brewer.pal(length(unique(all.grps2)), "Set3")))
+ccols <- as.character(ccols)
+
+mat <- t(fit2$tvals[-c(1:12),][c(2:23),])
+colnames(mat) <- sub("preds", "", colnames(mat))
+
+tmat <- mat * (abs(mat) > 1.96)
+#hc.cols <- hclust(dist(t(tmat)), method="ward.D2")
+zlim <- max(abs(tmat)) * c(-1,1)
+tmat[tmat==0] <- NA
+
+# separator lines
+seplines <- c(0,cumsum(rle(all.grps2)$lengths)) + 0.5
+
+heatmap(tmat, scale="none", col=cols, ColSideColors = ccols, 
+        zlim=zlim, Rowv=NA, Colv=NA, 
+        margins=c(9,5), cexCol = 1.25, cexRow = 1.25, 
+        add.expr = abline(v=seplines, h=6.5, col="grey50"))
+
+heatmap(tmat, scale="none", col=cols, 
+        zlim=zlim, Rowv=NA, Colv=NA, 
+        margins=c(9,5), cexCol = 1.25, cexRow = 1.25)
+```
+
+
+```{r}
+cols <- colorRampPalette(rev(brewer.pal(11, "RdBu")))(100)
+all.grps2 <- c("face",all.grps)
+ccols <- factor(all.grps2, levels=levels(factor(all.grps2)), 
+                labels=rev(brewer.pal(length(unique(all.grps2)), "Set3")))
+ccols <- as.character(ccols)
+
+mat <- t(fit2$tvals[-c(1:12),][c(24:45),])
+colnames(mat) <- sub("resid", "", colnames(mat))
+
+tmat <- mat * (abs(mat) > 1.96)
+#hc.cols <- hclust(dist(t(tmat)), method="ward.D2")
+zlim <- max(abs(tmat)) * c(-1,1)
+tmat[tmat==0] <- NA
+
+# separator lines
+seplines <- c(0,cumsum(rle(all.grps2)$lengths)) + 0.5
+
+heatmap(tmat, scale="none", col=cols, ColSideColors = ccols, 
+        zlim=zlim, Rowv=NA, Colv=NA, 
+        margins=c(9,5), cexCol = 1.25, cexRow = 1.25, 
+        add.expr = abline(v=seplines, h=6.5, col="grey50"))
+
+heatmap(tmat, scale="none", col=cols, 
+        zlim=zlim, Rowv=NA, Colv=NA, 
+        margins=c(9,5), cexCol = 1.25, cexRow = 1.25)
+```
+
+
+## Regressions: Only Traits
+
+So now I want to be able to compare the significance of different regions to the stuff I ran before. So I just spit out a table for the regression of predicted and residuals using the 6 trait factor scores.
+
+```{r}
+tpred <- spreds1[,1:6]#; colnames(tpred) <- paste("pred", colnames(tpred), sep=".")
+rpred <- sresids1[,1:6]#; colnames(rpred) <- paste("resid", colnames(rpred), sep=".")
+
+fit <- lm(std.rdats2 ~ ssubs + smcs + sfaces + rpred + tpred)
+sfit <- summary(fit)
+
+tvals <- sapply(sfit, function(x) x$coefficients[-c(1:13),3])
+rownames(tvals) <- substr(rownames(tvals), 0, 10)
+rownames(tvals) <- sub("tpred", "pred.", rownames(tvals))
+rownames(tvals) <- sub("rpred", "resid.", rownames(tvals))
+colnames(tvals) <- rnames
+round(t(tvals * (abs(tvals) > 1.96)), 2)
+
+sfit$`Response r.vATL`$
+       
+X <- model.matrix(~ssubs + smcs + sfaces + tpred + rpred)
+fit1 <- simple_lm(std.rdats2, X)
+fit1$tvals
+
+```
+

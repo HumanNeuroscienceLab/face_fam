@@ -286,7 +286,7 @@ faces.all2 <- convolve.spm.hrf(onsets0, durs0, tot.time, runs, nparams=1)
 
 afni.faces <- xmats$faces[ssubs=="sub01"]
 
-plot.ts(cbind(faces.all, afni.faces, faces.all2*2.5)[1:100,], plot.type="single", col=1:3)
+plot.ts(cbind(faces.all*2.5, afni.faces, faces.all2*2.5)[1:100,], plot.type="single", col=1:3)
 
 faces.allx <- faces.all*2.5
 summary(lm(rdats[,3] ~ faces.all + afni.faces))

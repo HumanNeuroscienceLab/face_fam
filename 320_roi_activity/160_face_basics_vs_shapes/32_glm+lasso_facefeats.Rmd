@@ -1,0 +1,234 @@
+---
+title: "ROI Regressions"
+author: "Zarrar Shehzad"
+date: "February 23, 2017"
+output: html_document
+    fig_width: 10
+    number_sections: yes
+    toc: yes
+---
+
+## Setup
+
+Load a bunch of packages and functions.
+
+```{r}
+# Path for my own packages
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+
+# General workhorse function
+library(plyr)
+
+# Parallelization
+suppressMessages(library(doMC))
+registerDoMC(24)
+
+# If we were to use ggplot2 and other plotting needs
+library(RColorBrewer)
+library(ggplot2)
+source("/data1/famface01/command/encoding/FirstPass/plot_functions.R")
+
+# This gets us the simple_lm function for faster GLMs
+source("/data1/famface01/command/encoding/SubRois_Unfam/lm_functions.R")
+
+## For heatmap.2
+#suppressMessages(library(gplots))
+## For our own custom convolution
+#source("/data1/famface01/command/encoding/ShapesAnalysis/000_funs_load_convolve.R")
+```
+
+And some general variable of interest.
+
+```{r}
+subjects <- sprintf("sub%02i", 1:6) # again skipping sub01
+#indir    <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+rnames   <- c("r.vATL","r.aFFA", "r.pFFA", "r.OFA", "r.EBA", 'r.Amyg', 
+              "l.vATL", "l.FFA", "l.OFA", "l.EBA", 'l.Amyg')
+```
+
+
+### Load
+
+#### Predicted/Residual Face Features
+
+Actually first load the predicted/residual face features.
+
+```{r}
+indir <- "/data1/famface01/analysis/misc/320_roi_task_activity"
+load(file.path(indir, "20_predict_face_feats.rda"), verbose=T)
+vnames <- demo.vnames
+```
+
+#### Convolve Features
+
+Second convolve the different features including faces. We load from what's been done before.
+
+```{r}
+ifile <- "/data1/famface01/analysis/misc/320_roi_task_activity/22_convolve_facefeats.rda"
+load(ifile, verbose=T)
+```
+
+#### ROI Data
+
+Then first, get the ROI data.
+
+```{r}
+load.cur <- function(subj) {
+  indir <- "/data1/famface01/analysis/encoding/ShapeAnalysis/data"
+  infile <- sprintf("%s/roi_n_more_%s.rda", indir, subj)
+  dat <- NULL
+  load(infile)
+  dat
+}
+
+dat.vols <- lapply(subjects, load.cur)
+names(dat.vols) <- subjects
+```
+
+#### Average ROI Time-Series
+
+We compile the average of each ROI (for now).
+
+```{r}
+lst.rdats <- lapply(dat.vols, function(dat) {
+  rdats <- sapply(dat$fmri$dat, rowMeans)
+  rdats
+})
+rdats <- do.call(rbind, lst.rdats)
+
+load("/data1/famface01/analysis/misc/320_roi_task_activity/std_roi_dat.rda", verbose=T)
+```
+
+
+## Regressions
+
+```{r}
+X <- model.matrix(~ssubs + smcs + sfaces + smats)
+fit <- simple_lm(std.rdats2, X)
+fit$tvals
+```
+
+Plot as heatmap
+
+```{r}
+cols <- colorRampPalette(rev(brewer.pal(11, "RdBu")))(100)
+all.grps2 <- c("face",all.grps)
+ccols <- factor(all.grps2, levels=levels(factor(all.grps2)), 
+                labels=rev(brewer.pal(length(unique(all.grps2)), "Set3")))
+ccols <- as.character(ccols)
+
+mat <- t(fit$tvals[-c(1:12),])
+colnames(mat) <- sub("smats", "", colnames(mat))
+
+tmat <- mat * (abs(mat) > 1.96)
+#hc.cols <- hclust(dist(t(tmat)), method="ward.D2")
+zlim <- max(abs(tmat)) * c(-1,1)
+tmat[tmat==0] <- NA
+
+# separator lines
+seplines <- c(0,cumsum(rle(all.grps2)$lengths)) + 0.5
+
+heatmap(tmat, scale="none", col=cols, ColSideColors = ccols, 
+        zlim=zlim, Rowv=NA, Colv=NA, 
+        margins=c(9,5), cexCol = 1.25, cexRow = 1.25, 
+        add.expr = abline(v=seplines, h=6.5, col="grey50"))
+```
+
+
+## Classification
+
+```{r}
+source("/data1/famface01/command/misc/face_representations/misc/cv_glmnet.R")
+
+snums <- as.numeric(factor(ssubs))
+
+lasso.coefs <- laply(1:ncol(std.rdats2), function(i) {
+  tmp <- run_cvglmnet(X[,-1], std.rdats2[,i], foldid=snums, alpha=1, parallel=F)
+  print(tmp$bestfit$val)
+  cfs <- tmp$bestfit$coef[-1][-c(1:12)]
+  names(cfs) <- colnames(X[,-1][,-c(1:12)])
+  cfs
+}, .parallel=T)
+colnames(lasso.coefs) <- sub("smats", "", colnames(lasso.coefs))
+rownames(lasso.coefs) <- rnames
+
+round(lasso.coefs, 2)
+```
+
+```{r}
+cols <- colorRampPalette(brewer.pal(9, "YlOrRd"))(100)
+#all.grps2 <- c("face",all.grps)
+all.grps2 <- all.grps
+ccols <- factor(all.grps2, levels=levels(factor(all.grps2)), 
+                labels=rev(brewer.pal(length(unique(all.grps2)), "Set3")))
+ccols <- as.character(ccols)
+
+mat <- abs(lasso.coefs)
+#colnames(mat) <- sub("smats", "", colnames(mat))
+
+tmat <- mat# * (abs(mat) > 1.96)
+zlim <- range(abs(tmat[tmat!=0]))
+tmat[tmat==0] <- NA
+
+# separator lines
+seplines <- c(0,cumsum(rle(all.grps2)$lengths)) + 0.5
+
+heatmap(tmat, scale="none", col=cols, ColSideColors = ccols, 
+        zlim=zlim, Rowv=NA, Colv=NA, 
+        margins=c(9,5), cexCol = 1.25, cexRow = 1.25, 
+        add.expr = abline(v=seplines, h=6.5, col="grey50"))
+```
+
+```{r}
+library(covTest)
+lasso.sig <- alply(std.rdats2, .(2), function(y) {
+  a <- lars(X[,-1], y)
+  tmp <- covTest(a, X[,-1], std.rdats2[,3])
+  inds <- tmp$results[,1][tmp$results[,3] < 0.05]
+  sub("mats", "", sub("s", "", colnames(X[,-1])))[inds]
+}, .parallel=T)
+names(lasso.sig) <- rnames
+lasso.sig
+```
+
+```{r}
+library(lassoscore)
+
+lasso.sigs2 <- laply(1:ncol(std.rdats2), function(i) {
+  tmp <- run_cvglmnet(X[,-1], std.rdats2[,i], foldid=snums, alpha=1, parallel=F)
+  print(tmp$bestfit$val)
+  tmp2 <- lassoscore(std.rdats2[,i], X[,-1], lambda=tmp$bestfit$lam)
+  sigs <- tmp2$p.model[-c(1:12)]
+  names(sigs) <- colnames(X[,-1][,-c(1:12)])
+  sigs
+}, .parallel=T)
+colnames(lasso.sigs2) <- sub("smats", "", colnames(lasso.sigs2))
+rownames(lasso.sigs2) <- rnames
+
+lasso.sigz <- qt(lasso.sigs2, Inf, lower.tail=F)
+```
+
+```{r}
+cols <- colorRampPalette(brewer.pal(9, "YlOrRd"))(100)
+#all.grps2 <- c("face",all.grps)
+all.grps2 <- all.grps
+ccols <- factor(all.grps2, levels=levels(factor(all.grps2)), 
+                labels=rev(brewer.pal(length(unique(all.grps2)), "Set3")))
+ccols <- as.character(ccols)
+
+mat <- lasso.sigz
+#colnames(mat) <- sub("smats", "", colnames(mat))
+
+tmat <- mat * (mat > 1.96)
+zlim <- range(tmat[tmat!=0])
+tmat[tmat==0] <- NA
+
+# separator lines
+seplines <- c(0,cumsum(rle(all.grps2)$lengths)) + 0.5
+
+heatmap(tmat, scale="none", col=cols, ColSideColors = ccols, 
+        zlim=zlim, Rowv=NA, Colv=NA, 
+        margins=c(9,5), cexCol = 1.25, cexRow = 1.25, 
+        add.expr = abline(v=seplines, h=6.5, col="grey50"))
+```
