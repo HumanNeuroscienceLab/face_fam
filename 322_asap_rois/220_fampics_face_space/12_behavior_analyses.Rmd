@@ -1,0 +1,1217 @@
+---
+title: "FamPics Behavioral Analysis"
+author: "Zarrar Shehzad"
+date: "May 12, 2017"
+output: html_document
+---
+
+This will run the behavioral analysis. We will examine the effects of the average face on RT and likeness ratings. We load the saved file by `22_setup_nnet+etc.R`.
+
+## Setup
+
+We first setup.
+
+```{r}
+if (!any(.libPaths() == "/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2")) .libPaths(c("/home/zshehzad/R/x86_64-redhat-linux-gnu-library/3.2", .libPaths()))
+if (!any(.libPaths() == "/home/zshehzad/R_libs")) .libPaths(c("~/R_libs", .libPaths()))
+
+library(doMC)
+registerDoMC(30)
+library(plyr)
+library(bigmemory)
+library(nlme)
+
+library(ggplot2)
+library(ggthemr)
+library(RColorBrewer)
+
+ggthemr('pale', type='outer', text_size=14, layout='plain')
+```
+
+```{r}
+load("210_fampics_setup/z_fampics_vars+funs.Rdata")
+```
+
+We then process some summary measures
+
+```{r}
+# each photo to average of ref space
+dist.to.avg <- Rfast::Dist(rbind(colMeans(vfeats), faces.exp2$feats))[-1,1]
+# each photo to its average
+dist.to.prots   <- Rfast::Dist(rbind(avg.clusts, faces.exp2$feats))[-(1:nrow(avg.clusts)),1:nrow(avg.clusts)]
+colnames(dist.to.prots) <- rownames(avg.clusts)
+dist.to.prots2  <- sapply(rownames(avg.clusts), function(pname) {
+  inds <- faces.exp2$df$person == pname
+  x <- dist.to.prots[,pname == colnames(dist.to.prots)]
+  x[!inds] <- 0
+  x[inds] <- scale(x[inds], center=T, scale=F)
+  x
+})
+dist.to.prots3 <- rowSums(dist.to.prots2)
+```
+
+
+## Average face explains face likeness not recognition
+
+### Stats
+
+Overall, the distance to overall average face isn't important for the behavioral ratings.
+
+RT isn't related although person-hood is related.
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+```
+
+Likeness rating can be explained by the distance to that person's prototype.
+
+```{r}
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+```
+
+### Viz
+
+For the identity, should only show the F-stats.
+
+```{r}
+sfit1 <- summary(aov(fit1))
+sfit2 <- summary(aov(fit2))
+sdf <- data.frame(
+  behav=rep(c("RT", "Likeness")), 
+  fvals=c(sfit1[[1]]$`F value`[1], sfit2[[1]]$`F value`[1])
+)
+
+ggthemr('pale', type='outer', text_size=16, layout='plain')
+ggplot(sdf, aes(x=behav, y=fvals)) + 
+  geom_hline(yintercept=2.7*2.7, linetype='dotted', size=0.5) + 
+  geom_bar(position=position_dodge(), stat="identity") + 
+  geom_hline(yintercept=0, color="grey10", size=1) + 
+  #scale_fill_hue() + 
+  ylab("F-Value") + 
+  labs(fill="Distance to") + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.title.x = element_blank())
+```
+
+Show the t-stats for each.
+
+```{r}
+sfit1 <- summary(fit1)
+sfit2 <- summary(fit2)
+sdf <- data.frame(
+  behav=rep(c("RT", "Likeness"), each=2), 
+  measure=rep(c("Population Average", "Person Average"), 2), 
+  tvals=c(sfit1$coefficients[9:10,3], sfit2$coefficients[9:10,3])
+)
+sdf$measure <- factor(as.character(sdf$measure), levels=rev(levels(sdf$measure)))
+
+ggthemr('pale', type='outer', text_size=16, layout='plain')
+ggplot(sdf, aes(x=behav, y=tvals, fill=measure, group=measure)) + 
+  geom_hline(yintercept=c(-1,1)*2.7, linetype='dotted', size=0.5) + 
+  geom_bar(position=position_dodge(), stat="identity") + 
+  geom_hline(yintercept=0, color="grey10", size=1) + 
+  #scale_fill_hue() + 
+  ylab("T-Value") + 
+  labs(fill="Distance to") + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.title.x = element_blank())
+```
+
+
+
+## Weighted average face does not improve fit for likeness ratings
+
+Get the weights from a glmnet. Since the ridge is usually best, we will focus on those values.
+
+```{r}
+library(caret)
+library(glmnet)
+registerDoMC(30)
+
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- X.train[y.train %in% trgts,]; y.train <- factor(y.train[y.train %in% trgts])
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Fit classifier
+tuneGrid <- ldply(c(0), function(alpha) {
+  lambdas <- glmnet(as.matrix(X.train), y.train, family="multinomial", nlambda=100, alpha=alpha)$lambda
+  data.frame(alpha=alpha, lambda=lambdas)
+}, .parallel=T)
+glmFit <- run_caret(X.train, y.train, "glmnet", tuneGrid=tuneGrid, family="multinomial")
+## save?
+
+# Get the weights
+vimps <- varImp(glmFit)$importance
+cfs <- predict(glmFit$finalModel, s=glmFit$bestTune$lambda, type="coefficients")
+wts <- sapply(cfs, function(x) x[-1])
+
+wdist.to.prots <- laply(1:nrow(avg.clusts), function(ai) {
+  avg.vec <- avg.clusts[ai,]
+  wt.vec  <- wts[,ai]
+  vimp.vec<- vimps[,ai]
+  laply(1:nrow(faces.exp2$feats), function(fi) {
+    vec     <- faces.exp2$feats[fi,]
+    sqrt(sum(  (wt.vec*(vec - avg.vec))^2  ))
+  })
+}, .parallel=T)
+wdist.to.prots <- t(wdist.to.prots)
+colnames(wdist.to.prots) <- rownames(avg.clusts)
+wdist.to.prots2  <- sapply(rownames(avg.clusts), function(pname) {
+  inds <- faces.exp2$df$person == pname
+  x <- wdist.to.prots[,pname == colnames(dist.to.prots)]
+  x[!inds] <- 0
+  x[inds] <- scale(x[inds], center=T, scale=F)
+  x
+})
+wdist.to.prots3 <- rowSums(wdist.to.prots2)
+```
+
+### Stats
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit1 <- lm(rt ~ person + dist.to.avg + wdist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+```
+
+```{r}
+fit2 <- lm(likeness ~ person + dist.to.avg + wdist.to.prots3, data=behav.df)
+print(summary(aov(fit2)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + wdist.to.prots3, data=behav.df)
+print(summary(fit2))
+```
+
+### Viz
+
+For the identity, should only show the F-stats.
+
+```{r}
+sfit1 <- summary(aov(fit1))
+sfit2 <- summary(aov(fit2))
+sdf <- data.frame(
+  behav=rep(c("RT", "Likeness")), 
+  fvals=c(sfit1[[1]]$`F value`[1], sfit2[[1]]$`F value`[1])
+)
+
+ggthemr('pale', type='outer', text_size=16, layout='plain')
+ggplot(sdf, aes(x=behav, y=fvals)) + 
+  geom_hline(yintercept=2.7*2.7, linetype='dotted', size=0.5) + 
+  geom_bar(position=position_dodge(), stat="identity") + 
+  geom_hline(yintercept=0, color="grey10", size=1) + 
+  #scale_fill_hue() + 
+  ylab("F-Value") + 
+  labs(fill="Distance to") + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.title.x = element_blank())
+```
+
+Show the t-stats for each.
+
+```{r}
+sfit1 <- summary(fit1)
+sfit2 <- summary(fit2)
+sdf <- data.frame(
+  behav=rep(c("RT", "Likeness"), each=2), 
+  measure=rep(c("Population Average", "Person Average"), 2), 
+  tvals=c(sfit1$coefficients[9:10,3], sfit2$coefficients[9:10,3])
+)
+sdf$measure <- factor(as.character(sdf$measure), levels=rev(levels(sdf$measure)))
+
+ggthemr('pale', type='outer', text_size=16, layout='plain')
+ggplot(sdf, aes(x=behav, y=tvals, fill=measure, group=measure)) + 
+  geom_hline(yintercept=c(-1,1)*2.7, linetype='dotted', size=0.5) + 
+  geom_bar(position=position_dodge(), stat="identity") + 
+  geom_hline(yintercept=0, color="grey10", size=1) + 
+  #scale_fill_hue() + 
+  ylab("T-Value") + 
+  labs(fill="Distance to") + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.title.x = element_blank())
+```
+
+
+## Do the probability values fit the ratings or RT?
+
+The probability of being part of one class or not doesn't relate.
+
+```{r}
+ret <- predict(glmFit$finalModel, newx=as.matrix(X.test), s=glmFit$bestTune$lambda, type="response")
+prob.to.prots <- ret[,,1]
+prob.to.prots2  <- sapply(colnames(prob.to.prots), function(pname) {
+  inds <- faces.exp2$df$person == pname
+  x <- prob.to.prots[,pname == colnames(prob.to.prots)]
+  x[!inds] <- 0
+  x[inds] <- scale(x[inds], center=T, scale=F)
+  x
+})
+prob.to.prots3 <- rowSums(prob.to.prots2)
+```
+
+### Stats
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + prob.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+```
+
+```{r}
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + prob.to.prots3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+```
+
+
+## Behavioral Analysis
+
+
+
+### Prototype Effect of Other Faces?
+
+**RESULT:** No added effect for RT. Slight for likeness.
+
+From this analysis, we find that adding the distances to these faces doesn't add anything for RT and there is a slight boost for the likeness rating.
+
+We will calculate the distance to each of the four faces in a given set.
+
+```{r}
+targetsA <- c("Angelina_Jolie", "Julia_Roberts", "Justin_Timberlake", "Will_Smith")
+targetsB <- c("Jennifer_Aniston", "Oprah_Winfrey", "Brad_Pitt", "Johnny_Depp")
+dist.to.protsSet <- t(sapply(1:nrow(faces.exp2$feats), function(i) {
+  v <- vector("numeric", 8)
+  names(v) <- colnames(dist.to.prots)
+  if (as.character(behav.df$set)[i] == "setA") {
+    inds <- colnames(dist.to.prots) %in% targetsA
+  } else {
+    inds <- colnames(dist.to.prots) %in% targetsB
+  }
+  v[inds] <- scale(dist.to.prots[i,inds], scale=F, center=T)
+  v
+}))
+```
+
+Now we can re-run our model with this as an additional covariate.
+
+#### RT
+
+Nope, it doesn't help here to include the additional sets.
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + dist.to.protsSet, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+#### Likeness
+
+Here, including the sets helps but it is very small.
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + dist.to.protsSet, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+### Other way of relative prototype
+
+```{r}
+## compare
+dist.to.protsComp <- sapply(1:nrow(faces.exp2$feats), function(i) {
+  if (as.character(behav.df$set)[i] == "setA") {
+    inds <- colnames(dist.to.prots) %in% targetsA
+  } else {
+    inds <- colnames(dist.to.prots) %in% targetsB
+  }
+  v2 <- dist.to.prots[i,inds]
+  ci <- names(v2) == as.character(behav.df$person)[i]
+  v2 <- v2[ci]/mean(v2[!ci])
+  v2
+})
+#for (pname in colnames(dist.to.prots)) {
+#  inds <- behav.df$person == pname
+#  dist.to.protsComp[inds] <- scale(dist.to.protsComp[inds], scale=F, center=T)
+#}
+```
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + dist.to.protsComp, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + dist.to.protsComp, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+### Do probabilities from a classification model help?
+
+No for the probs
+
+```{r}
+library(caret)
+library(glmnet)
+registerDoMC(30)
+
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- X.train[y.train %in% trgts,]; y.train <- factor(y.train[y.train %in% trgts])
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+tuneGrid <- ldply(c(0,0.5,1), function(alpha) {
+  lambdas <- glmnet(as.matrix(X.train), y.train, family="multinomial", nlambda=50, alpha=0.5)$lambda
+  data.frame(alpha=alpha, lambda=lambdas)
+}, .parallel=T)
+glmFit <- run_caret(X.train, y.train, "glmnet", tuneGrid=tuneGrid, family="multinomial")
+ret <- predict(glmFit$finalModel, newx=as.matrix(X.test), s=glmFit$bestTune$lambda, type="response")
+prob.to.prots <- ret[,,1]
+prob.to.prots2  <- sapply(colnames(prob.to.prots), function(pname) {
+  inds <- faces.exp2$df$person == pname
+  x <- prob.to.prots[,pname == colnames(prob.to.prots)]
+  x[!inds] <- 0
+  x[inds] <- scale(x[inds], center=T, scale=F)
+  x
+})
+prob.to.prots3 <- rowSums(prob.to.prots2)
+```
+
+#### RT
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + prob.to.prots3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+#### Likeness
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + prob.to.prots3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+### What about a model looking at exemplars (kNN)?
+
+This isn't that great either.
+
+```{r}
+library(caret)
+registerDoMC(30)
+
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- X.train[y.train %in% trgts,]; y.train <- factor(y.train[y.train %in% trgts])
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Classify
+knnFit <- run_caret(X.train, y.train, "knn", tlen=10)
+
+# Preds/Probs
+probs <- predict(knnFit$finalModel, X.test)
+preds <- predict(knnFit$finalModel, X.test, type="class")
+
+# not always right
+table(comp=preds, ref=factor(faces.exp2$df$person))
+
+# collapse probs
+knn.probs2 <- sapply(1:ncol(probs), function(i) {
+  cname <- colnames(probs)[i]
+  inds <- as.character(y.test) == cname
+  x <- probs[,i] 
+  x[!inds] <- 0
+  x[inds] <- scale(x[inds], scale=F, center=T)
+  x
+})
+knn.probs3 <- rowSums(knn.probs2)
+
+# do by set
+targetsA <- c("Angelina_Jolie", "Julia_Roberts", "Justin_Timberlake", "Will_Smith")
+targetsB <- c("Jennifer_Aniston", "Oprah_Winfrey", "Brad_Pitt", "Johnny_Depp")
+knn.probSet <- t(sapply(1:nrow(faces.exp2$feats), function(i) {
+  v <- vector("numeric", 8)
+  names(v) <- colnames(dist.to.prots)
+  if (as.character(behav.df$set)[i] == "setA") {
+    inds <- colnames(probs) %in% targetsA
+  } else {
+    inds <- colnames(probs) %in% targetsB
+  }
+  v[inds] <- scale(probs[i,inds], scale=F, center=T)
+  v
+}))
+```
+
+#### RT
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + knn.probs3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+
+#### Likeness
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + knn.probs3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+
+### Try with 24 face set
+
+This isn't great either although the results are more significant for likeness.
+
+```{r}
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Classify
+probs <- t(laply(levels(behav.df$person), function(cname) {
+  y <- factor((y.train == cname)*1, levels=0:1, labels=c("No", "Yes"))
+  fit <- knn3(X.train, y, k=30)
+  predict(fit, X.test)[,2]
+}, .parallel=T))
+colnames(probs) <- levels(behav.df$person)
+
+# not good on test set!!!
+#diag(table(comp=preds, ref=factor(faces.exp2$df$person)))
+
+# collapse probs
+knn.probs2 <- sapply(1:length(levels(behav.df$person)), function(i) {
+  cname <- levels(behav.df$person)[i]
+  inds <- as.character(y.test) == cname
+  x <- probs[,colnames(probs)==cname]
+  x[!inds] <- 0
+  x[inds] <- scale(x[inds], scale=F, center=T)
+  x
+})
+knn.probs3 <- rowSums(knn.probs2)
+```
+
+#### RT
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + knn.probs3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+#### Likeness
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + knn.probs3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+
+### Try with 24 face set and rest of faces
+
+This is worse.
+
+```{r}
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- rbind(vfeats, X.train); y.train <- factor(c(rep("Other",nrow(vfeats)), as.character(y.train)))
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Classify
+probs <- t(laply(levels(behav.df$person), function(cname) {
+  y <- factor((y.train == cname)*1, levels=0:1, labels=c("No", "Yes"))
+  fit <- knn3(X.train, y, k=30)
+  predict(fit, X.test)[,2]
+}, .parallel=T))
+colnames(probs) <- levels(behav.df$person)
+
+# not good on test set!!!
+#diag(table(comp=preds, ref=factor(faces.exp2$df$person)))
+
+# collapse probs
+knn.probs2 <- sapply(1:length(levels(behav.df$person)), function(i) {
+  cname <- levels(behav.df$person)[i]
+  inds <- as.character(y.test) == cname
+  x <- probs[,colnames(probs)==cname]
+  x[!inds] <- 0
+  x[inds] <- scale(x[inds], scale=F, center=T)
+  x
+})
+knn.probs3 <- rowSums(knn.probs2)
+```
+
+#### RT
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + knn.probs3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+#### Likeness
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + knn.probs3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+### Do probabilities from a svm model help?
+
+No for the probs
+
+```{r}
+library(caret)
+library(e1071)
+registerDoMC(30)
+
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- X.train[y.train %in% trgts,]; y.train <- factor(y.train[y.train %in% trgts])
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+svmFit <- run_caret(X.train, y.train, "svmLinear2", tlen=10)
+# test preds/probs (will save to run regression)
+pred <- predict(svmFit$finalModel, X.test, 
+                decision.values=T, probability=T)
+svm.dvals <- attr(pred, "decision.values")
+svm.probs <- attr(pred, "probabilities")
+
+# collapse svm
+svm.probs2 <- sapply(colnames(svm.probs), function(name) {
+  x       <- svm.probs[,colnames(svm.probs)==name]
+  inds    <- (faces.exp2$df$person==name)
+  x       <- x * inds
+  x[inds] <- scale(x[inds], center=T, scale=T)
+  x
+})
+svm.probs3 <- rowSums(svm.probs2)
+
+# combine dvals
+# there are 7 dvals per identity
+unames <- levels(factor(faces.exp2$df$person))
+svm.dvals.ave <- sapply(1:length(unames), function(i) {
+  tmp <- svm.dvals[,grep(unames[i], colnames(svm.dvals))]
+  rowMeans(tmp)
+})
+colnames(svm.dvals.ave) <- unames
+# collapse dvals
+svm.dvals.ave2 <- sapply(colnames(svm.dvals.ave), function(name) {
+  x       <- svm.dvals.ave[,colnames(svm.dvals.ave)==name]
+  inds    <- (faces.exp2$df$person==name)
+  x       <- x * inds
+  x[inds] <- scale(x[inds], center=T, scale=T)
+  x
+})
+svm.dvals.ave3 <- rowSums(svm.dvals.ave2)
+```
+
+#### RT
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + svm.probs3 + svm.dvals.ave3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+#### Likeness
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + svm.probs3 + svm.dvals.ave3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+### Can we look at relative to the boundaries?
+
+```{r}
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- rbind(vfeats, X.train); y.train <- factor(c(rep("Other",nrow(vfeats)), as.character(y.train)))
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Classify + Get the Distance to Border
+svm.dvals <- t(laply(levels(behav.df$person), function(cname) {
+  y <- factor((y.train == cname)*1, levels=0:1, labels=c("No", "Yes"))
+  fit <- svm(X.train, y, cost=0.5, kernel="linear", probability=TRUE)
+  pred <- predict(fit, X.test, decision.values=T, probability=T)
+  svm.dvals <- attr(pred, "decision.values")
+  #svm.probs <- attr(pred, "probabilities")
+  svm.dvals
+}, .parallel=T))
+colnames(svm.dvals) <- levels(behav.df$person)
+
+# collapse
+svm.dvals2 <- sapply(colnames(svm.dvals), function(name) {
+  x       <- svm.dvals[,colnames(svm.dvals)==name]
+  inds    <- (faces.exp2$df$person==name)
+  x       <- x * inds
+  x[inds] <- scale(x[inds], center=T, scale=T)
+  x
+})
+svm.dvals3 <- rowSums(svm.dvals2)
+
+
+# probs
+svm.probs <- t(laply(levels(behav.df$person), function(cname) {
+  y <- factor((y.train == cname)*1, levels=0:1, labels=c("No", "Yes"))
+  fit <- svm(X.train, y, cost=0.5, kernel="linear", probability=TRUE)
+  pred <- predict(fit, X.test, decision.values=T, probability=T)
+  #svm.dvals <- attr(pred, "decision.values")
+  svm.probs <- attr(pred, "probabilities")
+  svm.probs[,"Yes"]
+}, .parallel=T))
+colnames(svm.probs) <- levels(behav.df$person)
+
+svm.probs2 <- sapply(colnames(svm.probs), function(name) {
+  x       <- svm.probs[,colnames(svm.probs)==name]
+  inds    <- (faces.exp2$df$person==name)
+  x       <- x * inds
+  x[inds] <- scale(x[inds], center=T, scale=T)
+  x
+})
+svm.probs3 <- rowSums(svm.probs2)
+```
+
+#### RT
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + svm.probs3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+#### Likeness
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + svm.probs3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+### Try a smaller subsample
+
+For the RT at least, this reduces and eliminates the effect.
+
+```{r}
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+#X.train <- rbind(vfeats, X.train); y.train <- factor(c(rep("Other",nrow(vfeats)), as.character(y.train)))
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Classify + Get the Distance to Border
+library(LiblineaR)
+svm.dvals <- t(laply(levels(behav.df$person), function(cname) {
+  y <- factor((y.train == cname)*1, levels=0:1, labels=c("No", "Yes"))
+  fit <- svm(X.train, y, cost=0.5, kernel="linear", probability=TRUE)
+  pred <- predict(fit, X.test, decision.values=T, probability=T)
+  svm.dvals <- attr(pred, "decision.values")
+  #svm.probs <- attr(pred, "probabilities")
+  svm.dvals
+}, .parallel=T))
+colnames(svm.dvals) <- levels(behav.df$person)
+
+# collapse
+svm.dvals2 <- sapply(colnames(svm.dvals), function(name) {
+  x       <- svm.dvals[,colnames(svm.dvals)==name]
+  inds    <- (faces.exp2$df$person==name)
+  x       <- x * inds
+  x[inds] <- scale(x[inds], center=T, scale=T)
+  x
+})
+svm.dvals3 <- rowSums(svm.dvals2)
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(aov(fit2)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(aov(fit2)))
+```
+
+```{r}
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- X.train[y.train %in% trgts,]; y.train <- factor(y.train[y.train %in% trgts])
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Classify + Get the Distance to Border
+svm.dvals <- t(laply(levels(behav.df$person), function(cname) {
+  y <- factor((y.train == cname)*1, levels=0:1, labels=c("No", "Yes"))
+  fit <- svm(X.train, y, cost=0.5, kernel="linear", probability=TRUE)
+  pred <- predict(fit, X.test, decision.values=T, probability=T)
+  svm.dvals <- attr(pred, "decision.values")
+  #svm.probs <- attr(pred, "probabilities")
+  svm.dvals
+}, .parallel=T))
+colnames(svm.dvals) <- levels(behav.df$person)
+
+# collapse
+svm.dvals2 <- sapply(colnames(svm.dvals), function(name) {
+  x       <- svm.dvals[,colnames(svm.dvals)==name]
+  inds    <- (faces.exp2$df$person==name)
+  x       <- x * inds
+  x[inds] <- scale(x[inds], center=T, scale=T)
+  x
+})
+svm.dvals3 <- rowSums(svm.dvals2)
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(aov(fit2)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(aov(fit2)))
+```
+
+
+### Try an SVM for just the decision boundary (we will exclude the probability)
+
+This SVM could also be used for getting the weights. I guess I wouldn't know if it worked until I try it on the brain data.
+
+But note that here (with exp(-d)) we are getting the desired prediction of variance for RT but not for likeness. Hooray!
+
+Also could we try mahalanobois instead of the euclidean distance? control funky shape of data??
+
+```{r}
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- rbind(vfeats, X.train); y.train <- factor(c(rep("Other",nrow(vfeats)), as.character(y.train)))
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Classify + Get the Distance to Border
+# either use 1, 2, 5 (no reg, L2, or L1 reg)
+svm.dvals <- t(laply(levels(behav.df$person), function(cname) {
+  y <- factor((y.train == cname)*1, levels=0:1, labels=c("No", "Yes"))
+  fit <- LiblineaR(X.train, y, type = 5, cost = 5) # from cross-valid
+  ## can't do probs with svm
+  pred <- predict(fit, X.test, proba=F, decisionValues=T)
+  svm.dvals <- pred$decisionValues[,1]
+  svm.dvals
+}, .parallel=T))
+colnames(svm.dvals) <- levels(behav.df$person)
+
+# collapse
+svm.dvals2 <- sapply(colnames(svm.dvals), function(name) {
+  x       <- svm.dvals[,colnames(svm.dvals)==name]
+  inds    <- (faces.exp2$df$person==name)
+  x       <- x * inds
+  x[inds] <- scale(exp(-x[inds]), center=T, scale=T) # works only with exp
+  x
+})
+svm.dvals3 <- rowSums(svm.dvals2)
+
+fit2 <- lm(cbind(rt, likeness) ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(aov(fit2)))
+```
+
+#### D-vals
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+## Weighted average face does not improve fit for likeness ratings
+
+Weights from svm aren't good either.
+
+```{r}
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- rbind(vfeats, X.train); y.train <- factor(c(rep("Other",nrow(vfeats)), as.character(y.train)))
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Classify + Get Weights
+svm.wts <- t(laply(levels(behav.df$person), function(cname) {
+  y <- factor((y.train == cname)*1, levels=0:1, labels=c("No", "Yes"))
+  fit <- LiblineaR(X.train, y, type = 3, cost = 10)
+  wts <- fit$W[1,1:(ncol(fit$W)-1)]
+  wts
+}, .parallel=T))
+colnames(svm.wts) <- levels(behav.df$person)
+
+# Weighted prots
+wdist.to.prots <- laply(1:nrow(avg.clusts), function(ai) {
+  avg.vec <- avg.clusts[ai,]
+  wt.vec  <- svm.wts[,ai]
+  laply(1:nrow(faces.exp2$feats), function(fi) {
+    vec     <- faces.exp2$feats[fi,]
+    sqrt(sum(  (wt.vec*(vec - avg.vec))^2  ))
+  })
+}, .parallel=T)
+wdist.to.prots <- t(wdist.to.prots)
+colnames(wdist.to.prots) <- rownames(avg.clusts)
+wdist.to.prots2  <- sapply(rownames(avg.clusts), function(pname) {
+  inds <- faces.exp2$df$person == pname
+  x <- wdist.to.prots[,pname == colnames(dist.to.prots)]
+  x[!inds] <- 0
+  x[inds] <- scale(x[inds], center=T, scale=F)
+  x
+})
+wdist.to.prots3 <- rowSums(wdist.to.prots2)
+
+fit1 <- lm(cbind(rt,likeness) ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+fit2 <- lm(cbind(rt,likeness) ~ person + dist.to.avg + wdist.to.prots3, data=behav.df)
+print(summary(aov(fit1)))
+print(summary(aov(fit2)))
+```
+
+### Stats
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit1 <- lm(rt ~ person + dist.to.avg + wdist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+```
+
+```{r}
+fit2 <- lm(likeness ~ person + dist.to.avg + wdist.to.prots3, data=behav.df)
+print(summary(aov(fit2)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + wdist.to.prots3, data=behav.df)
+print(summary(fit2))
+```
+
+
+
+
+
+
+
+### Use non-linear kernal for boundary
+
+No this doesn't help.
+
+```{r}
+# The data
+X.train <- faces.fullset$feats; y.train <- factor(faces.fullset$df$person)
+X.train <- rbind(vfeats, X.train); y.train <- factor(c(rep("Other",nrow(vfeats)), as.character(y.train)))
+X.test <- faces.exp2$feats; y.test <- factor(faces.exp2$df$person)
+
+# Classify + Get the Distance to Border
+svm.dvals <- t(laply(levels(behav.df$person), function(cname) {
+  y <- factor((y.train == cname)*1, levels=0:1, labels=c("No", "Yes"))
+  fit <- svm(X.train, y, kernel="radial", probability=TRUE)
+  pred <- predict(fit, X.test, decision.values=T, probability=T)
+  svm.dvals <- attr(pred, "decision.values")
+  #svm.probs <- attr(pred, "probabilities")
+  svm.dvals
+}, .parallel=T))
+colnames(svm.dvals) <- levels(behav.df$person)
+
+# collapse
+svm.dvals2 <- sapply(colnames(svm.dvals), function(name) {
+  x       <- svm.dvals[,colnames(svm.dvals)==name]
+  inds    <- (faces.exp2$df$person==name)
+  x       <- x * inds
+  x[inds] <- scale(x[inds], center=T, scale=T)
+  x
+})
+svm.dvals3 <- rowSums(svm.dvals2)
+```
+
+#### RT
+
+```{r}
+fit1 <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(rt ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+#### Likeness
+
+```{r}
+fit1 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit1))
+print(summary(aov(fit1)))
+
+fit2 <- lm(likeness ~ person + dist.to.avg + dist.to.prots3 + svm.dvals3, data=behav.df)
+print(summary(fit2))
+print(summary(aov(fit2)))
+
+anova(fit1, fit2)
+```
+
+
+
+
+### One to Everything
+
+We use all the faces 
+
+```{r}
+
+```
+
+## Scratch (move up)
+
+### RT
+
+For the RT measure, we see that the main effect of identity (person) is what is driving this effect. All the faces except for Julia Roberts have a significant negative relationship. I'm not sure what this means. It should mean that the average RT for each of them is below average, but that's a little weird no?
+
+```{r}
+fit <- lm(rt ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit))
+print(summary(aov(fit)))
+```
+
+I really don't get this effect. Oh it's because the baseline is the intercept is Angelina. So I need to do a contrast to get the effect for each.
+
+```{r}
+fit <- lm(rt ~ person, data=behav.df)
+print(summary(fit))
+```
+
+We can plot the RTs here. We see that for Julia and Angelina, people were the slowest. Fastest for Jennifer and Oprah.
+
+```{r}
+mean.rts <- tapply(scale(behav.df$rt), behav.df$person, mean)
+barplot(mean.rts)
+```
+
+```{r}
+sd.rts <- tapply(behav.df$rt, behav.df$person, sd)
+barplot(sd.rts)
+```
+
+One thing that I wonder here is if the RT is related to any competition with the nearest neighbor or prototype. So we might try a measure that gives some difference to the nearest or looks at the average comparison to the others.
+
+Oh and I also have the kNN and other measures.
+
+
+So the kdist here strangely doesn't do well but before it did?
+
+```{r}
+fit <- lm(rt ~ person + kdist + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit))
+print(summary(aov(fit)))
+```
+
+Maybe something about k-nn 
+
+```{r}
+k <- 10
+Xtest <- Rfast::Dist(faces.exp2$feats)
+kdists2 <- sapply(1:nrow(Xtest), function(i) {
+  mean(sort(as.numeric(Xtest[i,-i]))[1:k])
+})
+
+fit <- lm(rt ~ person + kdists2 + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit))
+print(summary(aov(fit)))
+
+
+k <- 10
+Xtest <- Rfast::Dist(fullfeats)
+kdists2 <- sapply(1:nrow(Xtest), function(i) {
+  mean(sort(as.numeric(Xtest[i,-i]))[1:k])
+})
+
+fit <- lm(rt ~ person + kdists2 + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit))
+print(summary(aov(fit)))
+
+```
+
+### Likeness
+
+I should check the likeness ratings as Angelina and Julia are really high here but how does that match with the RTs and with ppl not knowing them well.
+
+But the other point here is that the distances to each person's template have a strong effect on the likeness rating.
+
+```{r}
+fit <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(fit))
+print(summary(aov(fit)))
+```
+
+```{r}
+mean.like <- tapply(scale(behav.df$likeness), behav.df$person, mean)
+barplot(mean.like)
+```
+
+```{r}
+sd.like <- tapply(behav.df$likeness, behav.df$person, sd)
+barplot(sd.like)
+```
+
+
+Try for other models. Seems like the default stuff is just fine.
+
+```{r}
+fit <- lm(likeness ~ person + dist.to.avg + dist.to.prots3, data=behav.df)
+print(summary(aov(fit)))
+
+fit <- lm(likeness ~ person + exp(-dist.to.avg) + exp(-dist.to.prots3), data=behav.df)
+print(summary(aov(fit)))
+
+fit <- lm(likeness ~ person + exp(-(dist.to.avg^2)) + exp(-(dist.to.prots3^2)), data=behav.df)
+print(summary(aov(fit)))
+
+fit <- lm(likeness ~ person + log(dist.to.avg) + log(dist.to.prots3+1), data=behav.df)
+print(summary(aov(fit)))
+```

@@ -1,0 +1,24 @@
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run01.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run02.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run03.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run04.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run05.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run06.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run07.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run08.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run01.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run02.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run03.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run04.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run05.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run06.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run07.nii.gz'
+*+ WARNING: NO spatial transform (neither qform nor sform), in NIfTI file '/data1/famface01/analysis/preprocessed/sub06/func/fam_pics/rois_asap_ventral_peaks/asap_ventral_peaks_run08.nii.gz'
+*+ WARNING: !! in Signal+Baseline matrix:
+ * Largest singular value=1.72877
+ * 1 singular value is less than cutoff=1.72877e-07
+ * Implies strong collinearity in the matrix columns! 
+*+ WARNING: !! in Signal-only matrix:
+ * Largest singular value=1.72877
+ * 1 singular value is less than cutoff=1.72877e-07
+ * Implies strong collinearity in the matrix columns! 

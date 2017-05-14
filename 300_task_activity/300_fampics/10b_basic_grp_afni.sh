@@ -20,7 +20,7 @@ die() {
 # ARGS
 ###
 
-njobs=20
+njobs=30
 subjects=( sub01 sub02 sub03 sub04 sub05 sub06 )
 outdir="/data1/famface01/analysis/task_activity/group/fampics/fampics_main_effect.mema"
 taskdir_template="/data1/famface01/analysis/task_activity/__SUBJECT__/fampics/fampics_main_effect.reml"

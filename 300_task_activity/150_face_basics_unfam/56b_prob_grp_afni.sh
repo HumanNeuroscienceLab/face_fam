@@ -22,8 +22,8 @@ die() {
 
 njobs=20
 subjects=( sub01 sub02 sub03 sub04 sub05 sub06 )
-outdir="/data1/famface01/analysis/task_activity/group/face_basics_unfam/prob_gender_glasses_feats.mema"
-taskdir_template="/data1/famface01/analysis/task_activity/__SUBJECT__/face_basics_unfam/prob_gender_glasses_feats.reml"
+outdir="/data1/famface01/analysis/task_activity/group/face_basics_unfam/prob_gender_feats.mema"
+taskdir_template="/data1/famface01/analysis/task_activity/__SUBJECT__/face_basics_unfam/prob_gender_feats.reml"
 
 
 ###
@@ -186,10 +186,15 @@ echo "do the same but on nifti (+ have a liberal threshold)"
 for cname in ${contrasts[@]}; do
   echo "contrast: ${cname}"
   run "rm -f thresh_zstats_${cname}.nii.gz thresh_liberal_zstats_${cname}.nii.gz"
-  run "${scriptdir}/./apply_clustsim.R ClustSim.NN3 0.05 0.05 zstats_${cname}.nii.gz thresh_zstats_${cname}.nii.gz"
-  run "${scriptdir}/./apply_clustsim.R ClustSim.NN3 0.1 0.1 zstats_${cname}.nii.gz thresh_liberal_zstats_${cname}.nii.gz"
+  run "${scriptdir}/./apply_clustsim.R ClustSim.NN3_2sided 0.05 0.05 zstats_${cname}.nii.gz thresh_zstats_${cname}.nii.gz"
+  run "${scriptdir}/./apply_clustsim.R ClustSim.NN3_2sided 0.1 0.1 zstats_${cname}.nii.gz thresh_liberal_zstats_${cname}.nii.gz"
   echo
 done
+
+echo
+echo "combine easythresh together"
+run "${scriptdir}/./combine_zstats.sh ${outdir}"
+run "${scriptdir}/./combine_zstats_afni.sh ${outdir}"
 
 echo "END"
 

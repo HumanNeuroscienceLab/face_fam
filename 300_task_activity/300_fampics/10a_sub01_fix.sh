@@ -27,14 +27,16 @@ echo ${outdir}
 ${tog}/task_analysis.rb -i ${fundir}/fam_pics/filtered_func_run??.nii.gz \
   -m ${fundir}/mask.nii.gz \
   -b ${fundir}/mean_func.nii.gz \
+  --local \
   --output ${outdir} \
   --tr 1 \
   --polort 0 \
   --motion ${tdir}/motion.1D \
   --stim faces ${tdir}/stim_faces.txt 'SPMG1(1)' \
   --stim incorrect ${tdir}/stim_incorrect.txt 'SPMG1(1)' \
+  --stim-am1 rt_amp ${tdir}/stimam_rt.txt 'SPMG1(1)' \
   --stim-am1 rt_dur ${tdir}/stimdur_rt.txt 'dmBLOCK' \
   --regdir ${fundir}/reg \
   --tostandard \
   --threads ${nthreads}
-#--stim noresp ${tdir}/stim_noresp.txt 'SPMG1(1)' \
+# --stim noresp ${tdir}/stim_noresp.txt 'SPMG1(1)' \

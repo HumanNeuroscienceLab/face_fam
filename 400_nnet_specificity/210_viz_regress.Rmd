@@ -1,0 +1,231 @@
+---
+title: "Layers-Representations"
+author: "Zarrar"
+date: "April 14, 2017"
+output: html_document
+---
+
+We want to visualize properties of the neural network for an early, middle, and late layer to show how it slowly learns face identity, ignores unimportant features, and has improved representation for related features.
+
+## Load
+
+Libraries that will be relevant.
+
+```{r}
+library(plyr)
+library(ggplot2)
+suppressMessages(library(doMC))
+registerDoMC(20)
+```
+
+Note that we first selected some of the layers and then later subselected of those to get early/middle/late.
+
+```{r}
+select.layers <- c(3,4,5,8,11,12,13,14:19,21:22,25,26)
+select.layers2 <- c(4, 16, 26)
+sl.inds <- select.layers %in% select.layers2
+```
+
+We first must load in all the feature ridge regressions and the identity classification results.
+
+```{r}
+load_obj <- function(f) {
+    env <- new.env()
+    nm <- load(f, env)[1]
+    env[[nm]]
+}
+load_classify_obj <- function(f) {
+  obj <- load_obj(f)
+  if (length(obj) == length(select.layers)) {
+    obj <- obj[sl.inds]
+  }
+  return(obj)
+}
+
+outdir <- "/data1/famface01/analysis/misc/400_nnet_specificity"
+
+accs <- load_obj("accs.rda")
+accs <- accs[select.layers2,]
+### get within/between...a bit round-about
+#accs2 <- load_obj("accs2.rda")
+#accs2 <- accs2[,-c(1,1730,1631)]
+#rowMeans(accs2[,grep("^win", colnames(accs2))])
+#rowMeans(accs2[,grep("^btw", colnames(accs2))])
+
+fpaths <- list.files(outdir, pattern="rda", full.names=T)
+lst.classifys <- llply(fpaths, load_classify_obj, .progress="text")
+names(lst.classifys) <- sub(".rda", "", sub("classify_layers_", "", basename(fpaths)))
+## select the ones you want here
+lst.classifys <- lst.classifys[c("pose", "luminance", "attractive", "age")]
+```
+
+## Visualize
+
+### Format
+
+Let's format the inputs as a data-frame for later displaying.
+
+```{r}
+# First combine into a matrix
+cmat <- sapply(lst.classifys, function(x) sapply(x, function(xx) xx$mean.max.res))
+mat <- cbind(accs[,1:2], cmat)
+mat[,1] <- mat[,1]*100
+dimnames(mat) <- list(
+  Layers = c("Early", "Middle", "Later"), 
+  Measures = c("Nearest-Neighbor Accuracy", "Within vs Between Videos", "Pose", "Luminance", "Attractive", "Age")
+)
+print(mat)
+
+# Then convert to a dataframe
+df.mat <- reshape2::melt(mat)
+df.mat$Type <- factor(df.mat$Measures, levels=levels(df.mat$Measures), labels=rep(c("Cluster", "Negative", "Positive"), c(2,2,2)))
+df.mat <- df.mat[,c(1,4,2,3)]
+head(df.mat)
+```
+
+### Plot
+
+Some setup.
+
+```{r}
+library(ggthemr)
+library(RColorBrewer)
+
+ggthemr('pale', type='outer', text_size=14, layout='plain')
+
+outdir <- "/data1/famface01/figures/400_nnet_specificity"
+if (!file.exists(outdir)) dir.create(outdir)
+```
+
+I'll do the clustering ones separately and here first.
+
+```{r}
+# Gets the Cluster Measures
+sdf <- subset(df.mat, Type=="Cluster")
+## nn accuracy
+p1 <- ggplot(subset(sdf, Measures=="Nearest-Neighbor Accuracy"), aes(x=Layers, y=value, fill=Layers)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_manual(values=rev(brewer.pal(7, "Spectral")[1:3])) + 
+  facet_wrap(~Measures, scales = "free_y") + 
+  ylab("Percent Accuracy") + 
+  scale_y_continuous(breaks=95:100, expand=c(0,0)) + 
+  expand_limits(y=100.5) + 
+  coord_cartesian(ylim=c(95,100.5)) + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.line.x = element_line(color="black", size=1), 
+        legend.position = "none")
+## W/B Ratio
+p2 <- ggplot(subset(sdf, Measures=="Within vs Between Videos"), aes(x=Layers, y=value, fill=Layers)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_manual(values=rev(brewer.pal(7, "Spectral")[1:3])) + 
+  facet_wrap(~Measures, scales = "free_y") + 
+  ylab("Ratio W/B Distances ") + 
+  scale_y_continuous(breaks=seq(0,0.5,by=0.1), expand=c(0,0)) + 
+  expand_limits(y=0.6) + 
+  #coord_cartesian(ylim=c(95,100.5)) + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.line.x = element_line(color="black", size=1), 
+        legend.position = "none")
+
+# Combine
+# http://stackoverflow.com/questions/30280499/different-y-limits-on-ggplot-facet-grid-bar-graph
+## save
+p <- gridExtra::arrangeGrob(p1, p2, ncol=2)
+ggsave(file.path(outdir, "nnet_clusters.png"), p, width=8, height=4)
+ggsave(file.path(outdir, "nnet_clusters.pdf"), p, width=8, height=4)
+## view
+gridExtra::grid.arrange(p1, p2, ncol=2)
+```
+
+Now, I can do the negative variables. Really big drop in the later layer.
+
+```{r}
+# Gets the Cluster Measures
+sdf <- subset(df.mat, Type=="Negative")
+## Luminance
+p1 <- ggplot(subset(sdf, Measures=="Luminance"), aes(x=Layers, y=value, fill=Layers)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_manual(values=rev(brewer.pal(7, "Spectral")[1:3])) + 
+  facet_wrap(~Measures, scales = "free_y") + 
+  ylab(expression(r^2)) + 
+  scale_y_continuous(breaks=seq(0,1,by=0.2), expand=c(0,0)) + 
+  expand_limits(y=1.1) + 
+  coord_cartesian(ylim=c(0,1.1)) + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.line.x = element_line(color="black", size=1), 
+        legend.position = "none")
+## Pose
+p2 <- ggplot(subset(sdf, Measures=="Pose"), aes(x=Layers, y=value, fill=Layers)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_manual(values=rev(brewer.pal(7, "Spectral")[1:3])) + 
+  facet_wrap(~Measures, scales = "free_y") + 
+  ylab(expression(r^2)) + 
+  scale_y_continuous(breaks=seq(0,1,by=0.2), expand=c(0,0)) + 
+  expand_limits(y=1.1) + 
+  coord_cartesian(ylim=c(0,1.1)) + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.line.x = element_line(color="black", size=1), 
+        legend.position = "none")
+
+# Combine
+# http://stackoverflow.com/questions/30280499/different-y-limits-on-ggplot-facet-grid-bar-graph
+## save
+p <- gridExtra::arrangeGrob(p1, p2, ncol=2)
+ggsave(file.path(outdir, "nnet_neg_lum+pose.png"), p, width=8, height=4)
+ggsave(file.path(outdir, "nnet_neg_lum+pose.pdf"), p, width=8, height=4)
+## view
+gridExtra::grid.arrange(p1, p2, ncol=2)
+```
+
+And now the positive.
+
+```{r}
+# Gets the Cluster Measures
+sdf <- subset(df.mat, Type=="Positive")
+## Luminance
+p1 <- ggplot(subset(sdf, Measures=="Age"), aes(x=Layers, y=value, fill=Layers)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_manual(values=rev(brewer.pal(7, "Spectral")[1:3])) + 
+  facet_wrap(~Measures, scales = "free_y") + 
+  ylab(expression(r^2)) + 
+  scale_y_continuous(breaks=seq(0,1,by=0.2), expand=c(0,0)) + 
+  expand_limits(y=1.1) + 
+  coord_cartesian(ylim=c(0,1.1)) + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.line.x = element_line(color="black", size=1), 
+        legend.position = "none")
+## Pose
+p2 <- ggplot(subset(sdf, Measures=="Attractive"), aes(x=Layers, y=value, fill=Layers)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_manual(values=rev(brewer.pal(7, "Spectral")[1:3])) + 
+  facet_wrap(~Measures, scales = "free_y") + 
+  ylab(expression(r^2)) + 
+  scale_y_continuous(breaks=seq(0,1,by=0.2), expand=c(0,0)) + 
+  expand_limits(y=1.1) + 
+  coord_cartesian(ylim=c(0,1.1)) + 
+  theme(axis.line.y = element_blank(), 
+        panel.grid.major.x = element_blank(), 
+        axis.line.x = element_line(color="black", size=1), 
+        legend.position = "none")
+
+# Combine
+# http://stackoverflow.com/questions/30280499/different-y-limits-on-ggplot-facet-grid-bar-graph
+## save
+p <- gridExtra::arrangeGrob(p1, p2, ncol=2)
+ggsave(file.path(outdir, "nnet_pos_age+attractive.png"), p, width=8, height=4)
+ggsave(file.path(outdir, "nnet_pos_age+attractive.pdf"), p, width=8, height=4)
+## view
+gridExtra::grid.arrange(p1, p2, ncol=2)
+```
+
+
+```{r, echo=FALSE}
+plot(cars)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
